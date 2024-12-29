@@ -16,6 +16,9 @@ pub enum ActorError<T> {
     #[error("Channel closed, no messages left to process")]
     ChannelClosed,
 
+    #[error("System error {0}")]
+    SystemError(String),
+
     #[error("Unknown")]
     Unknown,
 }
@@ -27,6 +30,7 @@ impl<T> Debug for ActorError<T> {
             Self::SendError(arg0) => f.debug_tuple("SendError").field(arg0).finish(),
             Self::IoError(arg0) => f.debug_tuple("IoError").field(arg0).finish(),
             Self::ChannelClosed => write!(f, "ChannelClosed"),
+            Self::SystemError(arg0) => f.debug_tuple("SystemError").field(arg0).finish(),
             Self::Unknown => write!(f, "Unknown"),
         }
     }
