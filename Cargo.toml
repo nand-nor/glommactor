@@ -1,0 +1,22 @@
+[package]
+name = "glommactor"
+version = "0.1.0"
+authors = ["Alexandra Clifford <a13xandra.cliff0rd@gmail.com>"]
+edition = "2021"
+
+[dependencies]
+thiserror = "2.0.9"
+futures = "0.3.31"
+glommio = { version = "0.9.0", git="https://github.com/nand-nor/glommio", rev="b30f9eb783301b19b934ca203eb9c32ecf882ee6", optional=true}
+flume = {version= "0.11.1", features=["async"]}
+async-trait = "0.1.83"
+tracing = {version = "0.1.41"}
+
+[dev-dependencies]
+tracing = {version = "0.1.41"}
+tracing-subscriber = { version="0.3.0"}
+glommio = { version = "0.9.0", git="https://github.com/nand-nor/glommio", rev="b30f9eb783301b19b934ca203eb9c32ecf882ee6"}
+
+[[example]]
+name = "simple"
+required-features=["glommio"]
