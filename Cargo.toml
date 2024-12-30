@@ -7,21 +7,20 @@ edition = "2021"
 [dependencies]
 thiserror = "2.0.9"
 futures = "0.3.31"
-glommio = { version = "0.9.0", git="https://github.com/nand-nor/glommio", rev="b30f9eb783301b19b934ca203eb9c32ecf882ee6", optional=true}
+glommio = { version = "0.9.1", git="https://github.com/nand-nor/glommio", rev="bf0c68d"}
 flume = {version= "0.11.1", features=["async"]}
 async-trait = "0.1.83"
 tracing = {version = "0.1.41"}
+#futures-lite = "2.5.0"
 
 [dev-dependencies]
-tracing = {version = "0.1.41"}
 tracing-subscriber = { version="0.3.0"}
-glommio = { version = "0.9.0", git="https://github.com/nand-nor/glommio", rev="b30f9eb783301b19b934ca203eb9c32ecf882ee6"}
-flume = {version= "0.11.1", features=["async"]}
 
 [[example]]
 name = "simple"
-required-features=["glommio"]
 
 [[example]]
 name = "supervised_simple"
-required-features=["glommio"]
+
+[[example]]
+name = "supervisor_core"
