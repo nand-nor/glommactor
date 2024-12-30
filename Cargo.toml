@@ -16,7 +16,12 @@ tracing = {version = "0.1.41"}
 tracing = {version = "0.1.41"}
 tracing-subscriber = { version="0.3.0"}
 glommio = { version = "0.9.0", git="https://github.com/nand-nor/glommio", rev="b30f9eb783301b19b934ca203eb9c32ecf882ee6"}
+flume = {version= "0.11.1", features=["async"]}
 
 [[example]]
 name = "simple"
+required-features=["glommio"]
+
+[[example]]
+name = "supervised_simple"
 required-features=["glommio"]

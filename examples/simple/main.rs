@@ -1,8 +1,7 @@
-use futures::executor::block_on;
 use glommactor::{handle::ActorHandle, Actor, ActorError, ActorState, Event};
 use glommio::{executor, Latency, LocalExecutorBuilder, Placement, Shares};
 use std::time::Duration;
-use tracing::{info, Level};
+use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
 pub type Reply = flume::Sender<()>;
@@ -47,10 +46,10 @@ impl HandleWrapper {
     async fn say_hello(&self) -> Result<(), ActorError<HelloWorldEvent>> {
         let (tx, rx) = flume::bounded(1);
         let msg = HelloWorldEvent::SayHello { reply: tx };
-        self.handle.send(msg).await;
+        self.handle.send(msg).await.ok();
 
         rx.recv_async().await.map_err(|e| {
-            let msg = "Send cancelled".to_string();
+            let msg = format!("Send cancelled {e:}");
             tracing::error!(msg);
             ActorError::ActorError(msg)
         })?;
@@ -113,7 +112,7 @@ impl HelloWorldActor {
                     drop(reply);
                     return;
                 }
-                reply.send(self.say_hello().await);
+                reply.send(self.say_hello().await).ok();
             }
             HelloWorldEvent::Start => {
                 self.state = ActorState::Running;
@@ -126,7 +125,7 @@ impl HelloWorldActor {
                 tracing::info!("Shutting down!");
                 self.state = ActorState::Stopping;
                 // re-assigning the receiver will close all sender ends
-                let (sender, receiver) = flume::unbounded();
+                let (_sender, receiver) = flume::unbounded();
                 self.receiver = receiver;
             }
         }
@@ -146,9 +145,9 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
     // create actor and handle before running in local executor tasks
     let (actor, handle) = ActorHandle::new(HelloWorldActor::new);
     let handle_wrapper = HandleWrapper { handle };
-    // without the call to shutdown, because we clone the handle,
-    // this keeps the recieve end of the actor channel open
-    let handle_clone = handle_wrapper.clone();
+    // without the call to shutdown done at line ~194, because we clone the handle,
+    // this would keep the recieve end of the actor channel open
+    let _handle_clone = handle_wrapper.clone();
 
     // pin actor to core 0
     handle_vec.push(
@@ -164,7 +163,7 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
                 let task = glommio::spawn_local_into(actor.run(), tq)
                     .map(|t| t.detach())
                     .map_err(|e| {
-                        tracing::error!("Error spawning actor");
+                        tracing::error!("Error spawning actor {e:}");
                         panic!("Actor core panic");
                     })
                     .unwrap();
@@ -184,21 +183,21 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
                     "handle-tq",
                 );
                 let fut = async move {
-                    handle_wrapper.say_hello().await;
+                    handle_wrapper.say_hello().await.ok();
                     tracing::info!("Sent say hello request");
 
-                    handle_wrapper.stop().await;
+                    handle_wrapper.stop().await.ok();
                     tracing::info!("Sent stop request");
 
                     // without this call, because we cloned the handle above, the program would never terminate
-                    handle_wrapper.shutdown().await;
+                    handle_wrapper.shutdown().await.ok();
                     tracing::info!("Sent shutdown request");
                 };
 
                 let task = glommio::spawn_local_into(fut, tq)
                     .map(|t| t.detach())
                     .map_err(|e| {
-                        tracing::error!("Error spawning task for handle");
+                        tracing::error!("Error spawning task for handle {e:}");
                         panic!("handle core panic");
                     })
                     .unwrap();

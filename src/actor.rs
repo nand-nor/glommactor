@@ -6,7 +6,7 @@ pub trait Actor<T: Event + Send>: Sized + Unpin + 'static {
     async fn run(self) -> Self::Result;
 }
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, Debug)]
 pub enum ActorState {
     Stopped,
     Started,
@@ -16,3 +16,6 @@ pub enum ActorState {
 
 // marker trait
 pub trait Event {}
+
+#[async_trait::async_trait]
+pub trait SupervisedActor<T: Event + Send>: Actor<T> {}
