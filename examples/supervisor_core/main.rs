@@ -3,6 +3,7 @@
 //! to check the state of each registered actor on a fixed interval, and
 //! execute a recovery task if heartbeat timeout scenario is encountered
 
+use futures::FutureExt;
 use glommactor::{
     handle::SupervisedActorHandle, Actor, ActorError, ActorId, ActorState, Event, SupervisedActor,
     Supervision, SupervisorHandle, SupervisorMessage,
@@ -144,7 +145,6 @@ impl HelloWorldActor {
             SupervisorMessage::Stop => {
                 self.state = ActorState::Stopped;
             }
-            SupervisorMessage::ClearAll => todo!(),
             SupervisorMessage::Shutdown => {
                 tracing::info!("Shutting down!");
                 self.state = ActorState::Shuttingdown;
@@ -152,7 +152,6 @@ impl HelloWorldActor {
                 let (_sender, receiver) = flume::unbounded();
                 self.receiver = receiver;
             }
-            SupervisorMessage::Backup => todo!(),
             SupervisorMessage::Id { reply } => {
                 reply.send(self.id).ok();
             }
@@ -177,7 +176,10 @@ impl HelloWorldActor {
                     drop(reply);
                     return;
                 }
-                reply.send(self.say_hello().await).ok();
+                {
+                    self.say_hello().await;
+                    reply.send(())
+                }.ok();
             }
         }
     }
@@ -207,6 +209,11 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
     let supervised_handle = supervisor_handle.clone();
     let handle_wrapper = HandleWrapper { handle };
 
+    let (shutdown_notif_tx, shutdown_notif_rx) = async_broadcast::broadcast(1);
+    let mut shutdown_notif_rx_sup = shutdown_notif_rx.clone();
+    let mut shutdown_notif_rx_actor = shutdown_notif_rx.clone();
+    let mut shutdown_notif_rx_handle = shutdown_notif_rx.clone();
+
     // pin actor to core 0
     handle_vec.push(
         LocalExecutorBuilder::new(Placement::Fixed(0))
@@ -226,7 +233,14 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
                     })
                     .ok();
                 if let Some(task) = task {
-                    task.await;
+                    futures::select! {
+                        _ = shutdown_notif_rx_actor.recv().fuse() => {
+                            tracing::info!("Shutdown notice received by rt-actor");
+                        }
+                        _ = task.fuse() => {
+
+                        }
+                    };
                 }
             })
             .unwrap(),
@@ -254,16 +268,15 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
                     supervised_handle.suspend_actor(id).await.ok();
                 };
 
-                let task = glommio::spawn_local_into(fut, tq)
+                let _task = glommio::spawn_local_into(fut, tq)
                     .map(|t| t.detach())
                     .map_err(|e| {
                         tracing::error!("Error spawning task for handle {e:}");
                         panic!("handle core panic");
                     })
                     .ok();
-                if let Some(task) = task {
-                    task.await;
-                }
+
+                shutdown_notif_rx_handle.recv().await.ok();
             })
             .unwrap(),
     );
@@ -293,7 +306,7 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
                     })
                     .ok();
 
-                let (shutdown_notif_tx, shutdown_notif_rx) = flume::bounded(1);
+                let (restart_notif_tx, restart_notif_rx) = flume::bounded(1);
 
                 // this future represents the top-level supervision task
                 // that performs heartbeat checks. An example closure
@@ -311,16 +324,16 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
                         glommio::timer::sleep(Duration::from_secs(2)).await;
                         let supervision = Supervision::new(
                             monitor_task_handle.clone(),
-                            |id, shutdown_notif_tx: Option<flume::Sender<ActorId>>| {
+                            |id, restart_notif_tx: Option<flume::Sender<ActorId>>| {
                                 tracing::info!(
                                     "Example closure running when heartbeat detection fails! {:?}",
                                     id
                                 );
-                                if let Some(tx) = shutdown_notif_tx {
+                                if let Some(tx) = restart_notif_tx {
                                     tx.send(id).ok();
                                 }
                             },
-                            Some(shutdown_notif_tx.clone()),
+                            Some(restart_notif_tx.clone()),
                         );
                         supervision.await;
                     }
@@ -330,13 +343,20 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
                 let mut task_vec = vec![];
                 let shutdown_task = glommio::spawn_local_into(
                     async move {
-                        if let Ok(id) = shutdown_notif_rx.recv_async().await.map_err(|e| {
+                        if let Ok(id) = restart_notif_rx.recv_async().await.map_err(|e| {
                             let msg = format!("Send cancelled {e:}");
                             tracing::error!(msg);
                         }) {
                             tracing::info!("heartbeat checker func fired! Restarting...");
                             restart_task_handle.start_actor(id).await.ok();
                         }
+
+                        // wait some time to demonstrate actor restarting
+                        glommio::timer::sleep(Duration::from_secs(2)).await;
+                        shutdown_notif_tx
+                            .broadcast(())
+                            .await
+                            .expect("Failed to send shutdown notif");
                     },
                     tq,
                 )
@@ -362,7 +382,14 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
                     task_vec.push(task);
                 }
 
-                futures::future::join_all(task_vec).await;
+                futures::select! {
+                    _ = shutdown_notif_rx_sup.recv().fuse() => {
+                        tracing::info!("Shutdown notice received by rt-supervisor");
+                    }
+                    _ = futures::future::join_all(task_vec).fuse() => {
+
+                    }
+                };
             })
             .unwrap(),
     );
@@ -370,6 +397,8 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
     for handle in handle_vec {
         handle.join().unwrap();
     }
+
+    tracing::info!("Shutting down");
 
     Ok(())
 }

@@ -114,7 +114,10 @@ impl HelloWorldActor {
                     drop(reply);
                     return;
                 }
-                reply.send(self.say_hello().await).ok();
+                {
+                    self.say_hello().await;
+                    reply.send(())
+                }.ok();
             }
             HelloWorldEvent::Start => {
                 self.state = ActorState::Running;

@@ -139,7 +139,6 @@ impl HelloWorldActor {
             SupervisorMessage::Stop => {
                 self.state = ActorState::Stopped;
             }
-            SupervisorMessage::ClearAll => todo!(),
             SupervisorMessage::Shutdown => {
                 tracing::info!("Shutting down!");
                 self.state = ActorState::Shuttingdown;
@@ -147,7 +146,6 @@ impl HelloWorldActor {
                 let (_sender, receiver) = flume::unbounded();
                 self.receiver = receiver;
             }
-            SupervisorMessage::Backup => todo!(),
             SupervisorMessage::Id { reply } => {
                 reply.send(self.id).ok();
             }
@@ -166,7 +164,10 @@ impl HelloWorldActor {
                     drop(reply);
                     return;
                 }
-                reply.send(self.say_hello().await).ok();
+                {
+                    self.say_hello().await;
+                    reply.send(())
+                }.ok();
             }
         }
     }
