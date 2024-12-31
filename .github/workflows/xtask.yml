@@ -1,0 +1,27 @@
+name: Runner for CI
+
+on:
+  workflow_call:
+  push:
+  pull_request:
+    branches: [main]
+    types:
+      - opened
+      - ready_for_review
+
+jobs:
+  build:
+    name: CI Xtask
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          target: x86_64-unknown-linux-gnu
+
+      - uses: actions/checkout@v3
+
+      - name: compile check
+        run: |
+          cargo clippy -- -D warnings
+          cargo xtask run
