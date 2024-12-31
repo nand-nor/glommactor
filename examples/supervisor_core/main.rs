@@ -1,15 +1,14 @@
-//! Demonstrates creation of a supervised actor and handle. In this example
-//! the supervisor and actor-handle are pinned to core 1 and the actor is
-//! pinned to core 0. The handle sends a hello_world request, then the
-//! supervisor requests the state and sends a shutdown message to the actor
-//!
-//! Note that the supervisor can run as an actor and be pinned to it's
-//! own core, see supervisor_core example
+//! Demonstrates the creation of a supervisor handle that is pinned to a
+//! specific core and runs a heartbeat supervision task, configured
+//! to check the state of each registered actor on a fixed interval, and
+//! execute a recovery task if heartbeat timeout scenario is encountered
+
 use glommactor::{
     handle::SupervisedActorHandle, Actor, ActorError, ActorId, ActorState, Event, SupervisedActor,
-    SupervisorHandle, SupervisorMessage,
+    Supervision, SupervisorHandle, SupervisorMessage,
 };
 use glommio::{executor, Latency, LocalExecutorBuilder, Placement, Shares};
+use std::time::Duration;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
@@ -101,12 +100,17 @@ impl HelloWorldActor {
         loop {
             futures::select! {
                     event = self.receiver.recv_async() => {
-                    match event {
-                        Ok(event) => self.process_event(event).await,
-                        Err(e) => {
-                            tracing::warn!("Channel error {e:}");
+
+                        if self.state == ActorState::Stopped {
+                            // dont process events if in stopped state
+                        } else {
+                            match event {
+                                Ok(event) => self.process_event(event).await,
+                                Err(e) => {
+                                    tracing::warn!("Channel error {e:}");
+                                }
+                            };
                         }
-                    };
                 },
                 event = self.supervisor.recv_async() => {
                     match event {
@@ -134,6 +138,7 @@ impl HelloWorldActor {
                 self.set_id(id).await;
             }
             SupervisorMessage::Start => {
+                tracing::info!("Actor is restarting!");
                 self.state = ActorState::Running;
             }
             SupervisorMessage::Stop => {
@@ -152,7 +157,13 @@ impl HelloWorldActor {
                 reply.send(self.id).ok();
             }
             SupervisorMessage::State { reply } => {
-                reply.send(self.state.clone()).ok();
+                // heartbeat checks call for actor to report their state,
+                // and in this example we stop the actor to demonstrate how
+                // supervisor task can restart it. So, simulate heartbeat
+                // failure to response when in stopped state
+                if self.state != ActorState::Stopped {
+                    reply.send(self.state.clone()).ok();
+                }
             }
         }
     }
@@ -176,19 +187,24 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::TRACE)
         .finish();
-
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     let mut handle_vec = vec![];
 
-    // create supervisor
+    // create supervisor actor and handle
     let (mut supervisor, supervisor_handle) = SupervisorHandle::new();
-    // direct access via supervisor actor (for operations outside of async context)
+
+    // [Supervisor] struct allows direct access via supervisor-as-actor,
+    // which can be usef to set up new actor outside of async runtime context
+    // since all actor handle operations are async
     let (tx, rx, id) = supervisor.new_supervisee_setup().unwrap();
 
-    // create a supervised actor and handle before running in local executor tasks
+    // create a supervised actor and handle before running/spawning in local executor tasks
     let (actor, handle) = SupervisedActorHandle::new(tx, rx, id, HelloWorldActor::new);
 
+    // clone supervisor handle for use in demonstrating response to suspend
+    // via heartbeat recovery func
+    let supervised_handle = supervisor_handle.clone();
     let handle_wrapper = HandleWrapper { handle };
 
     // pin actor to core 0
@@ -198,7 +214,7 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
             .spawn(move || async move {
                 let tq = executor().create_task_queue(
                     Shares::default(),
-                    Latency::NotImportant,
+                    Latency::Matters(Duration::from_millis(500)),
                     "actor-tq",
                 );
 
@@ -216,7 +232,7 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
             .unwrap(),
     );
 
-    // pin handle to actor and actor supervisor to core 1
+    // pin handle to actor to core 1
     handle_vec.push(
         LocalExecutorBuilder::new(Placement::Fixed(1))
             .name(&format!("{}{}", "rt-handle", 0))
@@ -233,35 +249,10 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
                         tracing::info!("Sent say hello request");
                     }
 
-                    let state = supervisor_handle
-                        .actor_state(id)
-                        .await
-                        .map_err(|e| {
-                            tracing::error!("Failed to send shutdown actor action {e:}");
-                        })
-                        .ok();
-
-                    if let Some(state) = state {
-                        tracing::info!("Actor state for id {id:} is {state:?}");
-                    }
-
-                    tracing::info!("Supervisor sending shutdown request");
-                    supervisor_handle
-                        .shutdown_actor(id)
-                        .await
-                        .map_err(|e| {
-                            tracing::error!("Failed to send shutdown actor action {e:}");
-                        })
-                        .ok();
+                    glommio::timer::sleep(Duration::from_secs(5)).await;
+                    tracing::info!("Supervisor suspending actor... (demonstrating restart!)");
+                    supervised_handle.suspend_actor(id).await.ok();
                 };
-
-                glommio::spawn_local_into(supervisor.run(), tq)
-                    .map(|t| t.detach())
-                    .map_err(|e| {
-                        tracing::error!("Error spawning task for handle {e:}");
-                        panic!("handle core panic");
-                    })
-                    .ok();
 
                 let task = glommio::spawn_local_into(fut, tq)
                     .map(|t| t.detach())
@@ -273,6 +264,105 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
                 if let Some(task) = task {
                     task.await;
                 }
+            })
+            .unwrap(),
+    );
+
+    // pin supervisor to core 2
+    handle_vec.push(
+        LocalExecutorBuilder::new(Placement::Fixed(2))
+            .name(&format!("{}{}", "rt-supervisor", 0))
+            .spawn(move || async move {
+                let tq = executor().create_task_queue(
+                    Shares::default(),
+                    Latency::Matters(Duration::from_millis(1)),
+                    "supervisor-tq",
+                );
+
+                // create separate task queue for spawning supervisor actor
+                let stq = executor().create_task_queue(
+                    Shares::default(),
+                    Latency::Matters(Duration::from_millis(1)),
+                    "supervisor-tq-run",
+                );
+                glommio::spawn_local_into(supervisor.run(), stq)
+                    .map(|t| t.detach())
+                    .map_err(|e| {
+                        tracing::error!("Error spawning task for handle {e:}");
+                        panic!("handle core panic");
+                    })
+                    .ok();
+
+                let (shutdown_notif_tx, shutdown_notif_rx) = flume::bounded(1);
+
+                // this future represents the top-level supervision task
+                // that performs heartbeat checks. An example closure
+                // is passed in to [Supervision] struct to demonstrate
+                // how message passing can be used to alert subscribers if
+                // an actor has shut down, and optioanlly restart them.
+                // The function provides 1 generic optional arg, so
+                // caller can supply a variety of function args and
+                // even pass in a closure that does nothing.
+                // In this example, the closure is used for
+                // restarting the stopped actor
+                let monitor_task_handle = supervisor_handle.clone();
+                let fut = async move {
+                    loop {
+                        glommio::timer::sleep(Duration::from_secs(2)).await;
+                        let supervision = Supervision::new(
+                            monitor_task_handle.clone(),
+                            |id, shutdown_notif_tx: Option<flume::Sender<ActorId>>| {
+                                tracing::info!(
+                                    "Example closure running when heartbeat detection fails! {:?}",
+                                    id
+                                );
+                                if let Some(tx) = shutdown_notif_tx {
+                                    tx.send(id).ok();
+                                }
+                            },
+                            Some(shutdown_notif_tx.clone()),
+                        );
+                        supervision.await;
+                    }
+                };
+
+                let restart_task_handle = supervisor_handle.clone();
+                let mut task_vec = vec![];
+                let shutdown_task = glommio::spawn_local_into(
+                    async move {
+                        if let Ok(id) = shutdown_notif_rx.recv_async().await.map_err(|e| {
+                            let msg = format!("Send cancelled {e:}");
+                            tracing::error!(msg);
+                        }) {
+                            tracing::info!("heartbeat checker func fired! Restarting...");
+                            restart_task_handle.start_actor(id).await.ok();
+                        }
+                    },
+                    tq,
+                )
+                .map(|t| t.detach())
+                .map_err(|e| {
+                    tracing::error!("Error spawning task for handle {e:}");
+                    panic!("handle core panic");
+                })
+                .ok();
+
+                if let Some(shutdown_task) = shutdown_task {
+                    task_vec.push(shutdown_task);
+                }
+
+                let task = glommio::spawn_local_into(fut, tq)
+                    .map(|t| t.detach())
+                    .map_err(|e| {
+                        tracing::error!("Error spawning task for handle {e:}");
+                        panic!("handle core panic");
+                    })
+                    .ok();
+                if let Some(task) = task {
+                    task_vec.push(task);
+                }
+
+                futures::future::join_all(task_vec).await;
             })
             .unwrap(),
     );

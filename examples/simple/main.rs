@@ -1,3 +1,5 @@
+//! Simple demonstration of the Actor trait and corresponding handle
+//! as implemented for a HelloWorldActor
 use glommactor::{handle::ActorHandle, Actor, ActorError, ActorState, Event};
 use glommio::{executor, Latency, LocalExecutorBuilder, Placement, Shares};
 use std::time::Duration;

@@ -1,5 +1,4 @@
 use std::fmt::Debug;
-
 use thiserror::Error;
 
 #[derive(Error)]
@@ -19,6 +18,9 @@ pub enum ActorError<T> {
     #[error("System error {0}")]
     SystemError(String),
 
+    #[error("Actor heartbeat timed out {0}")]
+    HeartbeatTimeout(crate::ActorId),
+
     #[error("Unknown")]
     Unknown,
 }
@@ -31,6 +33,7 @@ impl<T> Debug for ActorError<T> {
             Self::IoError(arg0) => f.debug_tuple("IoError").field(arg0).finish(),
             Self::ChannelClosed => write!(f, "ChannelClosed"),
             Self::SystemError(arg0) => f.debug_tuple("SystemError").field(arg0).finish(),
+            Self::HeartbeatTimeout(arg0) => f.debug_tuple("HeartbeatTimeout").field(arg0).finish(),
             Self::Unknown => write!(f, "Unknown"),
         }
     }
