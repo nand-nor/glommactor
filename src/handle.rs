@@ -1,8 +1,14 @@
 use crate::{Actor, ActorError, ActorId, ActorState, Event, SupervisorMessage};
 
-pub trait Handle {}
+pub trait Handle {
+    type State;
+}
 
-impl<T: Event + Send> Handle for ActorHandle<T> {}
+pub trait State {}
+
+impl<T: Event + Send> Handle for ActorHandle<T> {
+    type State = Box<dyn State>;
+}
 
 #[derive(Clone)]
 pub struct ActorHandle<T: Event + Send> {
@@ -43,7 +49,9 @@ impl<T: Event + Send> Clone for SupervisedActorHandle<T> {
     }
 }
 
-impl<T: Event + Send> Handle for SupervisedActorHandle<T> {}
+impl<T: Event + Send> Handle for SupervisedActorHandle<T> {
+    type State = ActorState;
+}
 
 #[async_trait::async_trait]
 pub trait SupervisedHandle: Handle {
@@ -52,7 +60,7 @@ pub trait SupervisedHandle: Handle {
     async fn send_shutdown(&self) -> Result<(), Self::Error>;
     async fn send_start(&self) -> Result<(), Self::Error>;
     async fn subscribe_direct(&self) -> Self::Rx;
-    async fn actor_state(&self) -> Result<ActorState, Self::Error>;
+    async fn actor_state(&self) -> Result<<Self as Handle>::State, Self::Error>;
 }
 
 #[async_trait::async_trait]
@@ -68,7 +76,7 @@ impl<T: Event + Send> SupervisedHandle for SupervisedActorHandle<T> {
     async fn subscribe_direct(&self) -> Self::Rx {
         self.handle_subscribe_direct().await
     }
-    async fn actor_state(&self) -> Result<ActorState, Self::Error> {
+    async fn actor_state(&self) -> Result<<Self as Handle>::State, Self::Error> {
         self.get_state().await
     }
 }

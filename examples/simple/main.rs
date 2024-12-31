@@ -1,19 +1,23 @@
 //! Simple demonstration of the Actor trait and corresponding handle
 //! as implemented for a HelloWorldActor
-use glommactor::{handle::ActorHandle, Actor, ActorError, ActorState, Event};
+use glommactor::{
+    handle::{ActorHandle, Handle},
+    Actor, ActorError, ActorState, Event,
+};
 use glommio::{executor, Latency, LocalExecutorBuilder, Placement, Shares};
 use std::time::Duration;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
-pub type Reply = flume::Sender<()>;
+pub type Reply<T> = flume::Sender<T>;
 
 #[derive(Clone, Debug)]
 pub enum HelloWorldEvent {
-    SayHello { reply: Reply },
+    SayHello { reply: Reply<()> },
     Stop,
     Start,
     Shutdown,
+    State { reply: Reply<ActorState> },
 }
 
 impl Event for HelloWorldEvent {}
@@ -34,6 +38,10 @@ impl HelloWorldActor {
 
 struct HandleWrapper {
     handle: ActorHandle<HelloWorldEvent>,
+}
+
+impl Handle for HandleWrapper {
+    type State = ActorState;
 }
 
 impl Clone for HandleWrapper {
@@ -69,6 +77,18 @@ impl HandleWrapper {
         let msg = HelloWorldEvent::Shutdown;
         let _ = self.handle.send(msg).await;
         Ok(())
+    }
+
+    async fn state(&self) -> Result<<Self as Handle>::State, ActorError<HelloWorldEvent>> {
+        let (tx, rx) = flume::bounded(1);
+
+        let msg = HelloWorldEvent::State { reply: tx };
+        let _ = self.handle.send(msg).await;
+        Ok(rx.recv_async().await.map_err(|e| {
+            let msg = format!("Send cancelled {e:}");
+            tracing::error!(msg);
+            ActorError::ActorError(msg)
+        })?)
     }
 }
 
@@ -134,6 +154,9 @@ impl HelloWorldActor {
                 let (_sender, receiver) = flume::unbounded();
                 self.receiver = receiver;
             }
+            HelloWorldEvent::State { reply } => {
+                reply.send(self.state.clone()).ok();
+            }
         }
         tracing::debug!("Processed");
     }
@@ -192,8 +215,23 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
                     handle_wrapper.say_hello().await.ok();
                     tracing::info!("Sent say hello request");
 
+                    if let Ok(state) = handle_wrapper.state().await {
+                        tracing::info!("Actor state is {:?}", state);
+                    }
+
                     handle_wrapper.stop().await.ok();
                     tracing::info!("Sent stop request");
+
+                    if let Ok(state) = handle_wrapper.state().await {
+                        tracing::info!("Actor state is {:?}", state);
+                    }
+
+                    // Expect this to fail due to how the actor is using state to
+                    // drop certain requests (see line 132)
+                    handle_wrapper
+                        .say_hello()
+                        .await
+                        .expect_err("Actor still responded to say_hello despite being stopped");
 
                     // without this call, because we cloned the handle above, the program would never terminate
                     handle_wrapper.shutdown().await.ok();
