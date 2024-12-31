@@ -1,6 +1,5 @@
 #[async_trait::async_trait]
 pub trait Actor<T: Event + Send> {
-    //}: Sized + Unpin + 'static {
     type Rx;
     type Error;
     type Result;

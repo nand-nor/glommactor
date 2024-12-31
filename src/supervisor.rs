@@ -19,22 +19,18 @@ pub enum SupervisorMessage {
     Id { reply: Reply<ActorId> },
     Start,
     Stop,
-    ClearAll,
     Shutdown,
-    Backup,
     State { reply: Reply<ActorState> },
-    // Heartbeat { reply: Reply<()> },
 }
 
 pub struct Supervisor {
     /// Stores sender end for SupervisorMessages by Actor ID
-    bcast: HashMap<ActorId, flume::Sender<SupervisorMessage>>,
+    handles: HashMap<ActorId, flume::Sender<SupervisorMessage>>,
     /// Used to provide actors with unique IDs
     ids: HashSet<ActorId>,
     /// Supervisor can also optionally act as an actor
     /// but is not required to do so
     receiver: flume::Receiver<SupervisorAction>,
-    // self_handle: Su
 }
 
 impl Supervisor {
@@ -42,33 +38,32 @@ impl Supervisor {
         let mut ids = HashSet::default();
         ids.extend((0..ActorId::MAX).collect::<Vec<_>>());
         Self {
-            bcast: HashMap::default(),
+            handles: HashMap::default(),
             ids,
             receiver,
         }
     }
 
     async fn event_loop(mut self) -> Result<()> {
-        loop {
+        let err = loop {
             match self.receiver.recv_async().await {
                 Ok(event) => self.process(event).await,
                 Err(e) => {
                     tracing::warn!("Channel error {e:}");
-                    break;
+                    break e;
                 }
             }
-        }
-        Ok(())
+        };
+        Err(ActorError::from(err))
     }
 
     async fn process(&mut self, action: SupervisorAction) {
-        tracing::trace!("Processing supervisor action {action:?}");
         match action {
             SupervisorAction::NewActorSetup { reply } => {
                 reply.send(self.new_supervisee_setup()).ok();
             }
             SupervisorAction::ShutdownAll { reply } => {
-                let keys = self.bcast.keys().copied().collect::<Vec<_>>();
+                let keys = self.handles.keys().copied().collect::<Vec<_>>();
                 for key in keys {
                     self.shutdown_actor(key)
                         .await
@@ -108,7 +103,6 @@ impl Supervisor {
         ActorId,
     )> {
         let (tx, rx) = flume::unbounded();
-        // todo this could in theory run out of IDs, should check the set is not empty
         let id = *self
             .ids
             .iter()
@@ -117,13 +111,13 @@ impl Supervisor {
 
         self.ids.take(&id);
         let _ = tx.send(SupervisorMessage::SetId { id });
-        self.bcast.insert(id, tx.clone());
+        self.handles.insert(id, tx.clone());
         Ok((tx, rx, id))
     }
 
     pub async fn shutdown_actor(&mut self, id: ActorId) -> Result<()> {
         tracing::trace!("Supervisor shutting down actor id {id:}");
-        if let Some(sender) = self.bcast.get(&id) {
+        if let Some(sender) = self.handles.get(&id) {
             sender
                 .send_async(SupervisorMessage::Shutdown)
                 .await
@@ -140,7 +134,7 @@ impl Supervisor {
 
     pub async fn stop_actor(&mut self, id: ActorId) -> Result<()> {
         tracing::trace!("Supervisor suspending actor id {id:}");
-        if let Some(sender) = self.bcast.get(&id) {
+        if let Some(sender) = self.handles.get(&id) {
             sender
                 .send_async(SupervisorMessage::Stop)
                 .await
@@ -155,7 +149,7 @@ impl Supervisor {
 
     pub async fn start_actor(&mut self, id: ActorId) -> Result<()> {
         tracing::trace!("Supervisor (re)starting actor id {id:}");
-        if let Some(sender) = self.bcast.get(&id) {
+        if let Some(sender) = self.handles.get(&id) {
             sender
                 .send_async(SupervisorMessage::Start)
                 .await
@@ -170,7 +164,7 @@ impl Supervisor {
 
     async fn actor_state(&mut self, id: ActorId) -> Result<ActorState> {
         tracing::trace!("Supervisor getting actor state id {id:}");
-        if let Some(sender) = self.bcast.get(&id) {
+        if let Some(sender) = self.handles.get(&id) {
             let (tx, rx) = flume::bounded(1);
             let msg = SupervisorMessage::State { reply: tx };
 
@@ -202,7 +196,7 @@ impl Supervisor {
     // actors, in order to restart if needed. TODO: configure
     // heartbeat for actors reporting to supervisor
     async fn get_current_ids(&mut self) -> Vec<ActorId> {
-        self.bcast.keys().copied().collect::<Vec<_>>()
+        self.handles.keys().copied().collect::<Vec<_>>()
     }
 }
 

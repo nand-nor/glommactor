@@ -1,6 +1,4 @@
-use crate::ActorState;
-
-use super::{Actor, ActorError, ActorId, Event, SupervisorMessage};
+use crate::{Actor, ActorError, ActorId, ActorState, Event, SupervisorMessage};
 
 pub trait Handle {}
 
@@ -22,7 +20,6 @@ impl<T: Event + Send> ActorHandle<T> {
     }
 
     pub async fn send(&self, event: T) -> Result<(), ActorError<T>> {
-        tracing::trace!("Sending event from handle to actor");
         self.sender
             .send_async(event)
             .await
@@ -116,7 +113,6 @@ impl<T: Event + Send> SupervisedActorHandle<T> {
     }
 
     pub async fn send(&self, event: T) -> Result<(), ActorError<T>> {
-        tracing::trace!("Sending event from handle to actor");
         self.sender
             .send_async(event)
             .await
@@ -127,7 +123,6 @@ impl<T: Event + Send> SupervisedActorHandle<T> {
         &self,
         msg: SupervisorMessage,
     ) -> Result<(), ActorError<SupervisorMessage>> {
-        tracing::trace!("Sending supervisor msg to actor");
         self.broadcast
             .send_async(msg)
             .await

@@ -11,10 +11,10 @@ glommio = { version = "0.9.1", git="https://github.com/nand-nor/glommio", rev="b
 flume = {version= "0.11.1", features=["async"]}
 async-trait = "0.1.83"
 tracing = {version = "0.1.41"}
-#futures-lite = "2.5.0"
 
 [dev-dependencies]
 tracing-subscriber = { version="0.3.0"}
+async-broadcast = "0.7.2"
 
 [[example]]
 name = "simple"
