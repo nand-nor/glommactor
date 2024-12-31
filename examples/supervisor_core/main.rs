@@ -179,7 +179,8 @@ impl HelloWorldActor {
                 {
                     self.say_hello().await;
                     reply.send(())
-                }.ok();
+                }
+                .ok();
             }
         }
     }

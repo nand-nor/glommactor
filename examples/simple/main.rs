@@ -117,7 +117,8 @@ impl HelloWorldActor {
                 {
                     self.say_hello().await;
                     reply.send(())
-                }.ok();
+                }
+                .ok();
             }
             HelloWorldEvent::Start => {
                 self.state = ActorState::Running;
