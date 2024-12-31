@@ -24,4 +24,5 @@ jobs:
       - name: compile check
         run: |
           cargo clippy -- -D warnings
+          cargo test
           cargo xtask run
