@@ -1,24 +1,42 @@
 //! A very simple actor framework, built for the glommio runtime
 
 mod actor;
+pub mod channel;
 mod error;
 pub mod handle;
 mod supervisor;
 
-pub use actor::{Actor, ActorState, Event, SupervisedActor};
+pub use actor::{Actor, ActorState, Event, PriorityActor, PriorityEvent, SupervisedActor};
+pub use channel::{ChannelRx, ChannelTx, PriorityChannelRx, PriorityRx};
 pub use error::ActorError;
 pub use supervisor::{Supervision, Supervisor, SupervisorHandle, SupervisorMessage};
 
 pub type ActorId = u16;
 
+pub type PriorityActorHandle<T> = handle::ActorHandle<
+    T,
+    async_priority_channel::Sender<T, PriorityEvent>,
+    async_priority_channel::Receiver<T, PriorityEvent>,
+>;
+
+pub fn new_priority_actor_with_handle<T: Event + Send, A: Actor<T> + Sized + Unpin + 'static>(
+    constructor: impl FnOnce(async_priority_channel::Receiver<T, PriorityEvent>) -> A,
+) -> (A, PriorityActorHandle<T>) {
+    let (tx, rx) = async_priority_channel::unbounded();
+    // create actor and handle before running in local executor tasks
+    handle::ActorHandle::new(constructor, tx, rx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::handle::ActorHandle;
     use super::*;
+    use crate::handle::Handle;
 
     #[test]
     fn single_event() {
         pub type Reply<T> = flume::Sender<T>;
+
         pub enum HelloEvent {
             SayHello { reply: Reply<()> },
         }
@@ -61,7 +79,7 @@ mod tests {
             }
         }
 
-        impl ActorHandle<HelloEvent> {
+        impl ActorHandle<HelloEvent, flume::Sender<HelloEvent>, flume::Receiver<HelloEvent>> {
             async fn say_hello(&self) -> Result<(), ActorError<HelloEvent>> {
                 let (tx, rx) = flume::bounded(1);
                 let msg = HelloEvent::SayHello { reply: tx };
@@ -75,7 +93,9 @@ mod tests {
             }
         }
 
-        let (actor, handle) = ActorHandle::new(HelloActor::new);
+        let (sender, receiver) = flume::unbounded();
+
+        let (actor, handle) = ActorHandle::new(HelloActor::new, sender, receiver);
 
         let handle = glommio::LocalExecutorBuilder::new(glommio::Placement::Fixed(0))
             .name(&format!("{}{}", "test-handle", 0))

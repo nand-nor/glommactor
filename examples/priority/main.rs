@@ -1,8 +1,8 @@
 //! Simple demonstration of the Actor trait and corresponding handle
 //! as implemented for a HelloWorldActor
 use glommactor::{
-    handle::{ActorHandle, Handle},
-    Actor, ActorError, ActorState, Event,
+    handle::ActorHandle, new_priority_actor_with_handle, Actor, ActorError, Event, PriorityActor,
+    PriorityEvent, PriorityRx,
 };
 use glommio::{executor, Latency, LocalExecutorBuilder, Placement, Shares};
 use std::time::Duration;
@@ -14,48 +14,51 @@ pub type Reply<T> = flume::Sender<T>;
 #[derive(Clone, Debug)]
 pub enum HelloWorldEvent {
     SayHello { reply: Reply<()> },
-    Stop,
-    Start,
     Shutdown,
-    State { reply: Reply<ActorState> },
 }
 
 impl Event for HelloWorldEvent {}
 
 struct HelloWorldActor {
-    receiver: flume::Receiver<HelloWorldEvent>,
-    state: ActorState,
+    receiver: PriorityRx<HelloWorldEvent>,
+}
+
+#[async_trait::async_trait]
+impl Actor<HelloWorldEvent> for HelloWorldActor
+where
+    HelloWorldEvent: Event + Send,
+{
+    type Rx = PriorityRx<HelloWorldEvent>;
+    type Error = ActorError<HelloWorldEvent>;
+    type Result = Result<(), Self::Error>;
+    async fn run(self) -> Self::Result {
+        self.event_loop().await
+    }
+}
+
+#[async_trait::async_trait]
+impl PriorityActor<HelloWorldEvent> for HelloWorldActor
+where
+    HelloWorldEvent: Event + Send,
+{
+    type Rx = PriorityRx<HelloWorldEvent>;
 }
 
 impl HelloWorldActor {
-    fn new(receiver: flume::Receiver<HelloWorldEvent>) -> Self {
-        Self {
-            receiver,
-            state: ActorState::Started,
-        }
+    fn new(receiver: PriorityRx<HelloWorldEvent>) -> Self {
+        Self { receiver }
     }
 }
 
 struct HandleWrapper {
     handle: ActorHandle<
         HelloWorldEvent,
-        flume::Sender<HelloWorldEvent>,
-        flume::Receiver<HelloWorldEvent>,
+        async_priority_channel::Sender<HelloWorldEvent, PriorityEvent>,
+        async_priority_channel::Receiver<HelloWorldEvent, PriorityEvent>,
     >,
 }
 
-#[async_trait::async_trait]
-impl Handle<HelloWorldEvent> for HandleWrapper {
-    type State = ActorState;
-    type Result = <ActorHandle<
-        HelloWorldEvent,
-        flume::Sender<HelloWorldEvent>,
-        flume::Receiver<HelloWorldEvent>,
-    > as Handle<HelloWorldEvent>>::Result;
-    async fn send(&self, event: HelloWorldEvent) -> Self::Result {
-        self.handle.send(event).await
-    }
-}
+use glommactor::handle::PriorityHandle;
 
 impl Clone for HandleWrapper {
     fn clone(&self) -> Self {
@@ -69,7 +72,10 @@ impl HandleWrapper {
     async fn say_hello(&self) -> Result<(), ActorError<HelloWorldEvent>> {
         let (tx, rx) = flume::bounded(1);
         let msg = HelloWorldEvent::SayHello { reply: tx };
-        self.handle.send(msg).await.ok();
+        self.handle
+            .send_with_priority(msg, PriorityEvent::RealTime)
+            .await
+            .ok();
 
         rx.recv_async().await.map_err(|e| {
             let msg = format!("Send cancelled {e:}");
@@ -80,100 +86,51 @@ impl HandleWrapper {
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), ActorError<HelloWorldEvent>> {
-        let msg = HelloWorldEvent::Stop;
-        let _ = self.handle.send(msg).await;
-        Ok(())
-    }
-
     async fn shutdown(&self) -> Result<(), ActorError<HelloWorldEvent>> {
         let msg = HelloWorldEvent::Shutdown;
-        let _ = self.handle.send(msg).await;
+        let _ = self
+            .handle
+            .send_with_priority(msg, PriorityEvent::RealTime)
+            .await;
         Ok(())
-    }
-
-    async fn state(
-        &self,
-    ) -> Result<<Self as Handle<HelloWorldEvent>>::State, ActorError<HelloWorldEvent>> {
-        let (tx, rx) = flume::bounded(1);
-
-        let msg = HelloWorldEvent::State { reply: tx };
-        let _ = self.handle.send(msg).await;
-        rx.recv_async().await.map_err(|e| {
-            let msg = format!("Send cancelled {e:}");
-            tracing::error!(msg);
-            ActorError::ActorError(msg)
-        })
-    }
-}
-
-#[async_trait::async_trait]
-impl Actor<HelloWorldEvent> for HelloWorldActor
-where
-    HelloWorldEvent: Event + Send,
-{
-    type Rx = futures::channel::mpsc::Receiver<HelloWorldEvent>;
-    type Error = ActorError<HelloWorldEvent>;
-    type Result = Result<(), Self::Error>;
-    async fn run(self) -> Self::Result {
-        self.event_loop().await
     }
 }
 
 impl HelloWorldActor {
-    async fn say_hello(&mut self) {
-        tracing::info!("Hello, world!");
+    async fn say_hello(&mut self, priority: PriorityEvent) {
+        tracing::info!("Hey this is a {:?} priority message!!", priority);
     }
 
     async fn event_loop(mut self) -> Result<(), ActorError<HelloWorldEvent>> {
-        self.state = ActorState::Running;
         loop {
-            match self.receiver.recv_async().await {
-                Ok(event) => self.process(event).await,
+            match self.receiver.recv().await {
+                Ok((event, priority)) => self.process(event, priority).await,
                 Err(e) => {
                     tracing::warn!("Channel error {e:}");
                     break;
                 }
             }
         }
-        self.state = ActorState::Stopped;
         Ok(())
     }
 
-    async fn process(&mut self, event: HelloWorldEvent) {
+    async fn process(&mut self, event: HelloWorldEvent, priority: PriorityEvent) {
         tracing::trace!("Processing event {event:?}");
 
         match event {
             HelloWorldEvent::SayHello { reply } => {
-                if self.state == ActorState::Stopped {
-                    drop(reply);
-                    return;
-                }
                 {
-                    self.say_hello().await;
+                    self.say_hello(priority).await;
                     reply.send(())
                 }
                 .ok();
             }
-            HelloWorldEvent::Start => {
-                self.state = ActorState::Running;
-            }
-            HelloWorldEvent::Stop => {
-                tracing::info!("Stopping!");
-                self.state = ActorState::Stopped;
-            }
             HelloWorldEvent::Shutdown => {
                 tracing::info!("Shutting down!");
-                self.state = ActorState::Stopping;
-                // re-assigning the receiver will close all sender ends
-                let (_sender, receiver) = flume::unbounded();
+                let (_sender, receiver) = async_priority_channel::unbounded();
                 self.receiver = receiver;
             }
-            HelloWorldEvent::State { reply } => {
-                reply.send(self.state.clone()).ok();
-            }
         }
-        tracing::debug!("Processed");
     }
 }
 
@@ -186,9 +143,8 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
 
     let mut handle_vec = vec![];
 
-    let (tx, rx) = flume::unbounded();
     // create actor and handle before running in local executor tasks
-    let (actor, handle) = ActorHandle::new(HelloWorldActor::new, tx, rx);
+    let (actor, handle) = new_priority_actor_with_handle(HelloWorldActor::new);
     let handle_wrapper = HandleWrapper { handle };
     // without the call to shutdown done at line ~194, because we clone the handle,
     // this would keep the recieve end of the actor channel open
@@ -230,24 +186,6 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
                 let fut = async move {
                     handle_wrapper.say_hello().await.ok();
                     tracing::info!("Sent say hello request");
-
-                    if let Ok(state) = handle_wrapper.state().await {
-                        tracing::info!("Actor state is {:?}", state);
-                    }
-
-                    handle_wrapper.stop().await.ok();
-                    tracing::info!("Sent stop request");
-
-                    if let Ok(state) = handle_wrapper.state().await {
-                        tracing::info!("Actor state is {:?}", state);
-                    }
-
-                    // Expect this to fail due to how the actor is using state to
-                    // drop certain requests (see line 132)
-                    handle_wrapper
-                        .say_hello()
-                        .await
-                        .expect_err("Actor still responded to say_hello despite being stopped");
 
                     // without this call, because we cloned the handle above, the program would never terminate
                     handle_wrapper.shutdown().await.ok();

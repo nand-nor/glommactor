@@ -3,7 +3,10 @@ use std::{
     pin::Pin,
 };
 
-use crate::{handle::ActorHandle, Actor, ActorError, ActorId, ActorState, Event};
+use crate::{
+    handle::{ActorHandle, Handle},
+    Actor, ActorError, ActorId, ActorState, Event,
+};
 use futures::FutureExt;
 
 pub type Reply<T> = flume::Sender<T>;
@@ -252,15 +255,20 @@ pub enum SupervisorAction {
 /// stand-alone entity
 #[derive(Clone)]
 pub struct SupervisorHandle {
-    handle: ActorHandle<SupervisorAction>,
+    handle: ActorHandle<
+        SupervisorAction,
+        flume::Sender<SupervisorAction>,
+        flume::Receiver<SupervisorAction>,
+    >,
 }
 
 impl Event for SupervisorAction {}
 
 impl SupervisorHandle {
     pub fn new() -> (Supervisor, Self) {
+        let (tx, rx) = flume::unbounded();
         // create supervisor
-        let (supervisor, handle) = ActorHandle::new(Supervisor::new);
+        let (supervisor, handle) = ActorHandle::new(Supervisor::new, tx, rx);
         (supervisor, Self { handle })
     }
 

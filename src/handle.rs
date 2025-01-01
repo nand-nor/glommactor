@@ -1,35 +1,72 @@
-use crate::{Actor, ActorError, ActorId, ActorState, Event, SupervisorMessage};
+use std::marker::PhantomData;
 
-pub trait Handle {
+use crate::{
+    channel::{ChannelTx, PriorityChannelTx},
+    Actor, ActorError, ActorId, ActorState, ChannelRx, Event, PriorityChannelRx, PriorityEvent,
+    SupervisorMessage,
+};
+
+#[async_trait::async_trait]
+pub trait Handle<T: Event + Send> {
     type State;
+    type Result;
+    async fn send(&self, event: T) -> Self::Result;
+}
+
+#[async_trait::async_trait]
+impl<T: Event + Send + Sync, S: ChannelTx<T> + Send + Sync, R: ChannelRx<T> + Send + Sync> Handle<T>
+    for ActorHandle<T, S, R>
+{
+    type State = Box<dyn State>;
+    type Result = <S as ChannelTx<T>>::Result;
+    async fn send(&self, event: T) -> Self::Result {
+        self.sender.send_event(event).await
+    }
+}
+
+#[async_trait::async_trait]
+pub trait PriorityHandle<T: Event + Send> {
+    type State;
+    type Result;
+    async fn send_with_priority(&self, event: T, priority: PriorityEvent) -> Self::Result;
 }
 
 pub trait State {}
 
-impl<T: Event + Send> Handle for ActorHandle<T> {
+#[async_trait::async_trait]
+impl<
+        T: Event + Send + Sync,
+        S: PriorityChannelTx<T> + Send + Sync,
+        R: PriorityChannelRx<T> + Send + Sync,
+    > PriorityHandle<T> for ActorHandle<T, S, R>
+{
     type State = Box<dyn State>;
+    type Result = <S as ChannelTx<T>>::Result;
+    async fn send_with_priority(&self, event: T, priority: PriorityEvent) -> Self::Result {
+        self.sender.send_with_priority(event, priority).await
+    }
 }
 
 #[derive(Clone)]
-pub struct ActorHandle<T: Event + Send> {
-    sender: flume::Sender<T>,
+pub struct ActorHandle<T: Event + Send, S: ChannelTx<T>, R: ChannelRx<T>> {
+    sender: S,
+    phantom: PhantomData<(T, R)>,
 }
 
-impl<T: Event + Send> ActorHandle<T> {
+impl<T: Event + Send, S: ChannelTx<T>, R: ChannelRx<T>> ActorHandle<T, S, R> {
     pub fn new<A: Actor<T> + Sized + Unpin + 'static>(
-        constructor: impl FnOnce(flume::Receiver<T>) -> A,
+        constructor: impl FnOnce(R) -> A,
+        sender: S,
+        receiver: R,
     ) -> (A, Self) {
-        let (sender, receiver) = flume::unbounded();
         let actor = constructor(receiver);
-
-        (actor, Self { sender })
-    }
-
-    pub async fn send(&self, event: T) -> Result<(), ActorError<T>> {
-        self.sender
-            .send_async(event)
-            .await
-            .map_err(ActorError::from)
+        (
+            actor,
+            Self {
+                sender,
+                phantom: PhantomData,
+            },
+        )
     }
 }
 
@@ -49,22 +86,27 @@ impl<T: Event + Send> Clone for SupervisedActorHandle<T> {
     }
 }
 
-impl<T: Event + Send> Handle for SupervisedActorHandle<T> {
+#[async_trait::async_trait]
+impl<T: Event + Send> Handle<T> for SupervisedActorHandle<T> {
     type State = ActorState;
+    type Result = std::result::Result<(), flume::SendError<T>>;
+    async fn send(&self, event: T) -> Self::Result {
+        self.sender.send_event(event).await
+    }
 }
 
 #[async_trait::async_trait]
-pub trait SupervisedHandle: Handle {
+pub trait SupervisedHandle<T: Event + Send>: Handle<T> {
     type Rx;
     type Error;
     async fn send_shutdown(&self) -> Result<(), Self::Error>;
     async fn send_start(&self) -> Result<(), Self::Error>;
     async fn subscribe_direct(&self) -> Self::Rx;
-    async fn actor_state(&self) -> Result<<Self as Handle>::State, Self::Error>;
+    async fn actor_state(&self) -> Result<<Self as Handle<T>>::State, Self::Error>;
 }
 
 #[async_trait::async_trait]
-impl<T: Event + Send> SupervisedHandle for SupervisedActorHandle<T> {
+impl<T: Event + Send> SupervisedHandle<T> for SupervisedActorHandle<T> {
     type Rx = flume::Sender<T>;
     type Error = ActorError<SupervisorMessage>;
     async fn send_shutdown(&self) -> Result<(), Self::Error> {
@@ -76,7 +118,7 @@ impl<T: Event + Send> SupervisedHandle for SupervisedActorHandle<T> {
     async fn subscribe_direct(&self) -> Self::Rx {
         self.handle_subscribe_direct().await
     }
-    async fn actor_state(&self) -> Result<<Self as Handle>::State, Self::Error> {
+    async fn actor_state(&self) -> Result<<Self as Handle<T>>::State, Self::Error> {
         self.get_state().await
     }
 }
