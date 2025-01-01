@@ -5,11 +5,13 @@
 //!
 //! Note that the supervisor can run as an actor and be pinned to it's
 //! own core, see supervisor_core example
+use std::time::Duration;
+
 use glommactor::{
-    handle::SupervisedActorHandle, Actor, ActorError, ActorId, ActorState, Event, SupervisedActor,
-    SupervisorHandle, SupervisorMessage,
+    handle::SupervisedActorHandle, spawn_exec_actor, spawn_exec_handle_fut, Actor, ActorError,
+    ActorId, ActorState, Event, SupervisedActor, SupervisorHandle, SupervisorMessage,
 };
-use glommio::{executor, Latency, LocalExecutorBuilder, Placement, Shares};
+use glommio::{Latency, Placement};
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
@@ -186,97 +188,88 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
     // create supervisor
     let (mut supervisor, supervisor_handle) = SupervisorHandle::new();
     // direct access via supervisor actor (for operations outside of async context)
-    let (tx, rx, id) = supervisor.new_supervisee_setup().unwrap();
+    let (tx, rx, id) = supervisor
+        .new_supervisee_setup()
+        .expect("Unable to alloc new channels for supervisee");
 
     // create a supervised actor and handle before running in local executor tasks
     let (actor, handle) = SupervisedActorHandle::new(tx, rx, id, HelloWorldActor::new);
 
     let handle_wrapper = HandleWrapper { handle };
 
-    // pin actor to core 0
+    // run actor on core 0
     handle_vec.push(
-        LocalExecutorBuilder::new(Placement::Fixed(0))
-            .name(&format!("{}{}", "rt-actor", 0))
-            .spawn(move || async move {
-                let tq = executor().create_task_queue(
-                    Shares::default(),
-                    Latency::NotImportant,
-                    "actor-tq",
-                );
-
-                let task = glommio::spawn_local_into(actor.run(), tq)
-                    .map(|t| t.detach())
-                    .map_err(|e| {
-                        tracing::error!("Error spawning actor {e:}");
-                        panic!("Actor core panic");
-                    })
-                    .ok();
-                if let Some(task) = task {
-                    task.await;
-                }
-            })
-            .unwrap(),
+        spawn_exec_actor(
+            actor,
+            1000,
+            Latency::Matters(Duration::from_millis(500)),
+            Placement::Fixed(0),
+            "rt-actor",
+            "tq-actor",
+        )
+        .expect("Unable to spawn actor onto runtime"),
     );
 
-    // pin handle to actor and actor supervisor to core 1
+    // run supervisor actor on core 1, give more shares and set
+    // latency to matter for the supervisor actor task
+    // (needed because we will also run the handle future
+    // on the same core in this example)
     handle_vec.push(
-        LocalExecutorBuilder::new(Placement::Fixed(1))
-            .name(&format!("{}{}", "rt-handle", 0))
-            .spawn(move || async move {
-                let tq = executor().create_task_queue(
-                    Shares::default(),
-                    Latency::NotImportant,
-                    "handle-tq",
-                );
-                let fut = async move {
-                    if let Err(e) = handle_wrapper.say_hello().await {
-                        tracing::error!("Failed to send say hello {e:}");
-                    } else {
-                        tracing::info!("Sent say hello request");
-                    }
+        spawn_exec_actor(
+            supervisor,
+            10000,
+            Latency::Matters(Duration::from_millis(100)),
+            Placement::Fixed(1),
+            "rt-supervisor",
+            "tq-supervisor",
+        )
+        .expect("Unable to spawn actor onto runtime"),
+    );
 
-                    let state = supervisor_handle
-                        .actor_state(id)
-                        .await
-                        .map_err(|e| {
-                            tracing::error!("Failed to send shutdown actor action {e:}");
-                        })
-                        .ok();
+    // In this future, the handle to the actor sends a request
+    // and then the supervisor handle checks state then shuts down the
+    // actor (oob from the direct actor handle)
+    let fut = async move {
+        if let Err(e) = handle_wrapper.say_hello().await {
+            tracing::error!("Failed to send say hello {e:}");
+        } else {
+            tracing::info!("Sent say hello request");
+        }
 
-                    if let Some(state) = state {
-                        tracing::info!("Actor state for id {id:} is {state:?}");
-                    }
-
-                    tracing::info!("Supervisor sending shutdown request");
-                    supervisor_handle
-                        .shutdown_actor(id)
-                        .await
-                        .map_err(|e| {
-                            tracing::error!("Failed to send shutdown actor action {e:}");
-                        })
-                        .ok();
-                };
-
-                glommio::spawn_local_into(supervisor.run(), tq)
-                    .map(|t| t.detach())
-                    .map_err(|e| {
-                        tracing::error!("Error spawning task for handle {e:}");
-                        panic!("handle core panic");
-                    })
-                    .ok();
-
-                let task = glommio::spawn_local_into(fut, tq)
-                    .map(|t| t.detach())
-                    .map_err(|e| {
-                        tracing::error!("Error spawning task for handle {e:}");
-                        panic!("handle core panic");
-                    })
-                    .ok();
-                if let Some(task) = task {
-                    task.await;
-                }
+        let state = supervisor_handle
+            .actor_state(id)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to send shutdown actor action {e:}");
             })
-            .unwrap(),
+            .ok();
+
+        if let Some(state) = state {
+            tracing::info!("Actor state for id {id:} is {state:?}");
+        }
+
+        tracing::info!("Supervisor sending shutdown request");
+        supervisor_handle
+            .shutdown_actor(id)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to send shutdown actor action {e:}");
+            })
+            .ok();
+    };
+
+    // pin handle to actor to core 1 along with supervisor, give
+    // it fewer shares and set latency to not matter
+    handle_vec.push(
+        spawn_exec_handle_fut(
+            100,
+            Latency::NotImportant,
+            Placement::Fixed(1),
+            "rt-handle",
+            "tq-handle",
+            fut,
+        )
+        .expect("Unable to spawn actor onto runtime"),
     );
 
     for handle in handle_vec {

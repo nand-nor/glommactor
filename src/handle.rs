@@ -89,7 +89,7 @@ impl<T: Event + Send> Clone for SupervisedActorHandle<T> {
 #[async_trait::async_trait]
 impl<T: Event + Send> Handle<T> for SupervisedActorHandle<T> {
     type State = ActorState;
-    type Result = std::result::Result<(), flume::SendError<T>>;
+    type Result = Result<(), flume::SendError<T>>;
     async fn send(&self, event: T) -> Self::Result {
         self.sender.send_event(event).await
     }

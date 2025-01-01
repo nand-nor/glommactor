@@ -29,7 +29,7 @@ impl<E: Event + Send> PriorityChannelRx<E> for PriorityRx<E> {}
 
 #[async_trait::async_trait]
 impl<E: Event + Send> ChannelTx<E> for flume::Sender<E> {
-    type Result = std::result::Result<(), Self::Error>;
+    type Result = Result<(), Self::Error>;
     type Error = flume::SendError<E>;
     async fn send_event(&self, s: E) -> Self::Result {
         self.send_async(s).await
@@ -40,7 +40,7 @@ impl<E: Event + Send> ChannelRx<E> for flume::Receiver<E> {}
 
 #[async_trait::async_trait]
 impl<E: Event + Send> ChannelTx<E> for async_priority_channel::Sender<E, PriorityEvent> {
-    type Result = std::result::Result<(), Self::Error>;
+    type Result = Result<(), Self::Error>;
     type Error = async_priority_channel::SendError<(E, PriorityEvent)>;
     async fn send_event(&self, s: E) -> Self::Result {
         self.send(s, PriorityEvent::default()).await
@@ -49,7 +49,7 @@ impl<E: Event + Send> ChannelTx<E> for async_priority_channel::Sender<E, Priorit
 
 #[async_trait::async_trait]
 impl<E: Event + Send> PriorityChannelTx<E> for async_priority_channel::Sender<E, PriorityEvent> {
-    type Result = std::result::Result<(), <Self as PriorityChannelTx<E>>::Error>;
+    type Result = Result<(), <Self as PriorityChannelTx<E>>::Error>;
     type Error = async_priority_channel::SendError<(E, PriorityEvent)>;
     async fn send_with_priority(
         &self,

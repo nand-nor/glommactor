@@ -1,11 +1,12 @@
-//! Simple demonstration of the Actor trait and corresponding handle
+//! Simple demonstration of the PriorityActor trait and corresponding handle
 //! as implemented for a HelloWorldActor
-use glommactor::{
-    handle::ActorHandle, new_priority_actor_with_handle, Actor, ActorError, Event, PriorityActor,
-    PriorityEvent, PriorityRx,
-};
-use glommio::{executor, Latency, LocalExecutorBuilder, Placement, Shares};
 use std::time::Duration;
+
+use glommactor::{
+    handle::ActorHandle, new_priority_actor_with_handle, spawn_exec_handle_fut,
+    spawn_exec_priority_actor, Actor, ActorError, Event, PriorityActor, PriorityEvent, PriorityRx,
+};
+use glommio::{Latency, Placement};
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
@@ -73,7 +74,7 @@ impl HandleWrapper {
         let (tx, rx) = flume::bounded(1);
         let msg = HelloWorldEvent::SayHello { reply: tx };
         self.handle
-            .send_with_priority(msg, PriorityEvent::RealTime)
+            .send_with_priority(msg, PriorityEvent::High)
             .await
             .ok();
 
@@ -90,7 +91,7 @@ impl HandleWrapper {
         let msg = HelloWorldEvent::Shutdown;
         let _ = self
             .handle
-            .send_with_priority(msg, PriorityEvent::RealTime)
+            .send_with_priority(msg, PriorityEvent::High)
             .await;
         Ok(())
     }
@@ -146,62 +147,39 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
     // create actor and handle before running in local executor tasks
     let (actor, handle) = new_priority_actor_with_handle(HelloWorldActor::new);
     let handle_wrapper = HandleWrapper { handle };
-    // without the call to shutdown done at line ~194, because we clone the handle,
-    // this would keep the recieve end of the actor channel open
-    let _handle_clone = handle_wrapper.clone();
 
     // pin actor to core 0
     handle_vec.push(
-        LocalExecutorBuilder::new(Placement::Fixed(0))
-            .name(&format!("{}{}", "rt-actor", 0))
-            .spawn(move || async move {
-                let tq = executor().create_task_queue(
-                    Shares::default(),
-                    Latency::Matters(Duration::from_millis(1)),
-                    "actor-tq",
-                );
-
-                let task = glommio::spawn_local_into(actor.run(), tq)
-                    .map(|t| t.detach())
-                    .map_err(|e| {
-                        tracing::error!("Error spawning actor {e:}");
-                        panic!("Actor core panic");
-                    })
-                    .unwrap();
-                task.await;
-            })
-            .unwrap(),
+        spawn_exec_priority_actor(
+            actor,
+            1000,
+            Latency::Matters(Duration::from_millis(100)),
+            Placement::Fixed(0),
+            "rt-actor",
+            "tq-actor",
+        )
+        .expect("Unable to spawn actor onto runtime"),
     );
+
+    let fut = async move {
+        handle_wrapper.say_hello().await.ok();
+        tracing::info!("Sent say hello request");
+
+        handle_wrapper.shutdown().await.ok();
+        tracing::info!("Sent shutdown request");
+    };
 
     // pin handle to actor to core 1
     handle_vec.push(
-        LocalExecutorBuilder::new(Placement::Fixed(1))
-            .name(&format!("{}{}", "rt-handle", 0))
-            .spawn(move || async move {
-                let tq = executor().create_task_queue(
-                    Shares::default(),
-                    Latency::NotImportant,
-                    "handle-tq",
-                );
-                let fut = async move {
-                    handle_wrapper.say_hello().await.ok();
-                    tracing::info!("Sent say hello request");
-
-                    // without this call, because we cloned the handle above, the program would never terminate
-                    handle_wrapper.shutdown().await.ok();
-                    tracing::info!("Sent shutdown request");
-                };
-
-                let task = glommio::spawn_local_into(fut, tq)
-                    .map(|t| t.detach())
-                    .map_err(|e| {
-                        tracing::error!("Error spawning task for handle {e:}");
-                        panic!("handle core panic");
-                    })
-                    .unwrap();
-                task.await;
-            })
-            .unwrap(),
+        spawn_exec_handle_fut(
+            100,
+            Latency::NotImportant,
+            Placement::Fixed(1),
+            "rt-handle",
+            "tq-handle",
+            fut,
+        )
+        .expect("Unable to spawn actor onto runtime"),
     );
 
     for handle in handle_vec {

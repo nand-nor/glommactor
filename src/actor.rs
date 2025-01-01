@@ -1,13 +1,21 @@
 use crate::channel::PriorityChannelRx;
 
+/// Simple actor trait
 #[async_trait::async_trait]
-pub trait Actor<T: Event + Send> {
+pub trait Actor<T: Event + Send>: Send {
     type Rx;
     type Error;
     type Result;
+    /// The actor's [`Actor::run`] method is essential the actor
+    /// spawn point
     async fn run(self) -> Self::Result;
 }
 
+/// [`ActorState`] is the default state enum available for
+/// use by [`Actor<T>`]s and their handles, as needed. It is
+/// fixed for use by the [`crate::supervisor::Supervisor`]  
+/// actor, so supervised actors must use this enum to
+/// represent state
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub enum ActorState {
     Stopped,
@@ -20,34 +28,40 @@ pub enum ActorState {
 // marker trait
 pub trait Event {}
 
+/// Represents a trait for supervised [`Actor`]s
 #[async_trait::async_trait]
 pub trait SupervisedActor<T: Event + Send>: Actor<T> {}
 
+/// Actors implementing the [`PriorityActor`] trait
+/// use the [`PriorityEvent`] enum
+/// to send events
 #[derive(Clone, Debug, Ord, PartialOrd, Default)]
 pub enum PriorityEvent {
-    BestEffort, // effectively broadcast, but may be delayed indefinitely (no delivery guarantee)
+    Low,
     #[default]
-    Low, // guaranteed to be delayed only a few times? need to determine policy
-    High,       // guaranteed to be  elayed once, then bumped in priority
-    RealTime,   // highest priority, guaranteed delivery
+    Medium,
+    High,
+    Urgent,
 }
 
-// Only care about the priorities being equal, not the inner
-// events
 impl PartialEq for PriorityEvent {
     fn eq(&self, other: &Self) -> bool {
         matches!(
             (self, other),
-            (Self::BestEffort, Self::BestEffort)
+            (Self::Urgent, Self::Urgent)
                 | (Self::Low, Self::Low)
+                | (Self::Medium, Self::Medium)
                 | (Self::High, Self::High)
-                | (Self::RealTime, Self::RealTime)
         )
     }
 }
 
 impl Eq for PriorityEvent {}
 
+/// [`PriorityActor`]s represent an actor that is expected to use
+/// [`async_priority_channel`] objects for sending and receiving events
+/// between actors & their handles. The channels use the [`PriorityEvent`]
+/// enum to send events with specific priorities
 #[async_trait::async_trait]
 pub trait PriorityActor<T: Event + Send>: Actor<T>
 where
@@ -132,21 +146,21 @@ mod tests {
                     "test",
                 );
 
-                let task = glommio::spawn_local_into(actor.run(), tq)
+                let task = glommio::spawn_local_into(PriorityActor::run(actor), tq)
                     .map(|t| t.detach())
                     .expect("Failed to spawn detached task");
 
                 // Send multiple messages simultaneously, we expect highest priority to be processed first
-                tx.send((), PriorityEvent::BestEffort)
+                tx.send((), PriorityEvent::Low)
                     .await
                     .expect("Faied to send from actor handle");
-                tx.send((), PriorityEvent::Low)
+                tx.send((), PriorityEvent::Medium)
                     .await
                     .expect("Faied to send from actor handle");
                 tx.send((), PriorityEvent::High)
                     .await
                     .expect("Faied to send from actor handle");
-                tx.send((), PriorityEvent::RealTime)
+                tx.send((), PriorityEvent::Urgent)
                     .await
                     .expect("Faied to send from actor handle");
                 task.await;
@@ -158,22 +172,22 @@ mod tests {
         // Of the multiple messages sent, assert the highest priority is processed first
         assert_eq!(
             test_rx.recv().expect("Unable to recv test result"),
-            PriorityEvent::RealTime
+            PriorityEvent::Urgent
         );
     }
 
     #[test]
     fn ord() {
         assert_eq!(
-            PriorityEvent::BestEffort.cmp(&PriorityEvent::Low),
+            PriorityEvent::Urgent.cmp(&PriorityEvent::Low),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            PriorityEvent::Low.cmp(&PriorityEvent::High),
             std::cmp::Ordering::Less
         );
         assert_eq!(
-            PriorityEvent::Low.cmp(&PriorityEvent::RealTime),
-            std::cmp::Ordering::Less
-        );
-        assert_eq!(
-            PriorityEvent::RealTime.cmp(&PriorityEvent::High),
+            PriorityEvent::High.cmp(&PriorityEvent::Medium),
             std::cmp::Ordering::Greater
         );
     }
