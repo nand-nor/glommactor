@@ -5,8 +5,9 @@
 
 use futures::FutureExt;
 use glommactor::{
-    handle::SupervisedActorHandle, Actor, ActorError, ActorId, ActorState, Event, SupervisedActor,
-    Supervision, SupervisorHandle, SupervisorMessage,
+    handle::SupervisedActorHandle, spawn_exec_actor_with_shutdown,
+    spawn_exec_handle_fut_with_shutdown, Actor, ActorError, ActorId, ActorState, Event,
+    SupervisedActor, Supervision, SupervisorHandle, SupervisorMessage,
 };
 use glommio::{executor, Latency, LocalExecutorBuilder, Placement, Shares};
 use std::time::Duration;
@@ -212,100 +213,74 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
 
     let (shutdown_notif_tx, shutdown_notif_rx) = async_broadcast::broadcast(1);
     let mut shutdown_notif_rx_sup = shutdown_notif_rx.clone();
-    let mut shutdown_notif_rx_actor = shutdown_notif_rx.clone();
-    let mut shutdown_notif_rx_handle = shutdown_notif_rx.clone();
+    let shutdown_notif_rx_actor = shutdown_notif_rx.clone();
+    let shutdown_notif_rx_handle = shutdown_notif_rx.clone();
 
-    // pin actor to core 0
+    // run actor on core 0
     handle_vec.push(
-        LocalExecutorBuilder::new(Placement::Fixed(0))
-            .name(&format!("{}{}", "rt-actor", 0))
-            .spawn(move || async move {
-                let tq = executor().create_task_queue(
-                    Shares::default(),
-                    Latency::Matters(Duration::from_millis(500)),
-                    "actor-tq",
-                );
-
-                let task = glommio::spawn_local_into(actor.run(), tq)
-                    .map(|t| t.detach())
-                    .map_err(|e| {
-                        tracing::error!("Error spawning actor {e:}");
-                        panic!("Actor core panic");
-                    })
-                    .ok();
-                if let Some(task) = task {
-                    futures::select! {
-                        _ = shutdown_notif_rx_actor.recv().fuse() => {
-                            tracing::info!("Shutdown notice received by rt-actor");
-                        }
-                        _ = task.fuse() => {
-
-                        }
-                    };
-                }
-            })
-            .unwrap(),
+        spawn_exec_actor_with_shutdown(
+            actor,
+            1000,
+            Latency::Matters(Duration::from_millis(500)),
+            Placement::Fixed(0),
+            "rt-actor",
+            "tq-actor",
+            shutdown_notif_rx_actor,
+        )
+        .expect("Unable to spawn actor onto runtime"),
     );
+
+    let fut = async move {
+        if let Err(e) = handle_wrapper.say_hello().await {
+            tracing::error!("Failed to send say hello {e:}");
+        }
+        // wait a few seconds
+        glommio::timer::sleep(Duration::from_secs(5)).await;
+        tracing::info!("Supervisor suspending actor... (demonstrating restart!)");
+        supervised_handle.suspend_actor(id).await.ok();
+    };
 
     // pin handle to actor to core 1
     handle_vec.push(
-        LocalExecutorBuilder::new(Placement::Fixed(1))
-            .name(&format!("{}{}", "rt-handle", 0))
-            .spawn(move || async move {
-                let tq = executor().create_task_queue(
-                    Shares::default(),
-                    Latency::NotImportant,
-                    "handle-tq",
-                );
-                let fut = async move {
-                    if let Err(e) = handle_wrapper.say_hello().await {
-                        tracing::error!("Failed to send say hello {e:}");
-                    } else {
-                        tracing::info!("Sent say hello request");
-                    }
-
-                    glommio::timer::sleep(Duration::from_secs(5)).await;
-                    tracing::info!("Supervisor suspending actor... (demonstrating restart!)");
-                    supervised_handle.suspend_actor(id).await.ok();
-                };
-
-                let _task = glommio::spawn_local_into(fut, tq)
-                    .map(|t| t.detach())
-                    .map_err(|e| {
-                        tracing::error!("Error spawning task for handle {e:}");
-                        panic!("handle core panic");
-                    })
-                    .ok();
-
-                shutdown_notif_rx_handle.recv().await.ok();
-            })
-            .unwrap(),
+        spawn_exec_handle_fut_with_shutdown(
+            100,
+            Latency::NotImportant,
+            Placement::Fixed(1),
+            "rt-handle",
+            "tq-handle",
+            fut,
+            shutdown_notif_rx_handle,
+        )
+        .expect("Unable to spawn actor onto runtime"),
     );
 
-    // pin supervisor to core 2
+    // run supervisor actor on core 2
+    handle_vec.push(
+        spawn_exec_actor_with_shutdown(
+            supervisor,
+            1000,
+            Latency::Matters(Duration::from_millis(100)),
+            Placement::Fixed(2),
+            "rt-supervisor",
+            "tq-supervisor",
+            shutdown_notif_rx,
+        )
+        .expect("Unable to spawn actor onto runtime"),
+    );
+
+    // Also run supervisor actor handle's fut on core 2,
+    // with shorter latency and more shares.
+    // For more complex scenarios like the below with
+    // multiple futures run by handles, dont use convenience wrappers
     handle_vec.push(
         LocalExecutorBuilder::new(Placement::Fixed(2))
-            .name(&format!("{}{}", "rt-supervisor", 0))
+            .name(&format!("{}{}", "rt-supervisor-fut", 0))
             .spawn(move || async move {
                 let tq = executor().create_task_queue(
-                    Shares::default(),
-                    Latency::Matters(Duration::from_millis(1)),
-                    "supervisor-tq",
+                    Shares::Static(10000),
+                    Latency::Matters(Duration::from_millis(10)),
+                    "supervisor-shutdown-tq",
                 );
-
-                // create separate task queue for spawning supervisor actor
-                let stq = executor().create_task_queue(
-                    Shares::default(),
-                    Latency::Matters(Duration::from_millis(1)),
-                    "supervisor-tq-run",
-                );
-                glommio::spawn_local_into(supervisor.run(), stq)
-                    .map(|t| t.detach())
-                    .map_err(|e| {
-                        tracing::error!("Error spawning task for handle {e:}");
-                        panic!("handle core panic");
-                    })
-                    .ok();
 
                 let (restart_notif_tx, restart_notif_rx) = flume::bounded(1);
 
@@ -352,8 +327,9 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
                             restart_task_handle.start_actor(id).await.ok();
                         }
 
-                        // wait some time to demonstrate actor restarting
-                        glommio::timer::sleep(Duration::from_secs(2)).await;
+                        // wait some time to demonstrate actor restarting before
+                        // sending the notice to shutdown
+                        glommio::timer::sleep(Duration::from_secs(5)).await;
                         shutdown_notif_tx
                             .broadcast(())
                             .await
@@ -364,7 +340,6 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
                 .map(|t| t.detach())
                 .map_err(|e| {
                     tracing::error!("Error spawning task for handle {e:}");
-                    panic!("handle core panic");
                 })
                 .ok();
 
@@ -376,7 +351,6 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
                     .map(|t| t.detach())
                     .map_err(|e| {
                         tracing::error!("Error spawning task for handle {e:}");
-                        panic!("handle core panic");
                     })
                     .ok();
                 if let Some(task) = task {
@@ -387,9 +361,7 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
                     _ = shutdown_notif_rx_sup.recv().fuse() => {
                         tracing::info!("Shutdown notice received by rt-supervisor");
                     }
-                    _ = futures::future::join_all(task_vec).fuse() => {
-
-                    }
+                    _ = futures::future::join_all(task_vec).fuse() => {}
                 };
             })
             .unwrap(),

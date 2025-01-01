@@ -2,9 +2,9 @@
 //! as implemented for a HelloWorldActor
 use glommactor::{
     handle::{ActorHandle, Handle},
-    Actor, ActorError, ActorState, Event,
+    spawn_exec_actor, spawn_exec_handle_fut, Actor, ActorError, ActorState, Event,
 };
-use glommio::{executor, Latency, LocalExecutorBuilder, Placement, Shares};
+use glommio::{Latency, Placement};
 use std::time::Duration;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
@@ -37,11 +37,24 @@ impl HelloWorldActor {
 }
 
 struct HandleWrapper {
-    handle: ActorHandle<HelloWorldEvent>,
+    handle: ActorHandle<
+        HelloWorldEvent,
+        flume::Sender<HelloWorldEvent>,
+        flume::Receiver<HelloWorldEvent>,
+    >,
 }
 
-impl Handle for HandleWrapper {
+#[async_trait::async_trait]
+impl Handle<HelloWorldEvent> for HandleWrapper {
     type State = ActorState;
+    type Result = <ActorHandle<
+        HelloWorldEvent,
+        flume::Sender<HelloWorldEvent>,
+        flume::Receiver<HelloWorldEvent>,
+    > as Handle<HelloWorldEvent>>::Result;
+    async fn send(&self, event: HelloWorldEvent) -> Self::Result {
+        self.handle.send(event).await
+    }
 }
 
 impl Clone for HandleWrapper {
@@ -79,16 +92,18 @@ impl HandleWrapper {
         Ok(())
     }
 
-    async fn state(&self) -> Result<<Self as Handle>::State, ActorError<HelloWorldEvent>> {
+    async fn state(
+        &self,
+    ) -> Result<<Self as Handle<HelloWorldEvent>>::State, ActorError<HelloWorldEvent>> {
         let (tx, rx) = flume::bounded(1);
 
         let msg = HelloWorldEvent::State { reply: tx };
         let _ = self.handle.send(msg).await;
-        Ok(rx.recv_async().await.map_err(|e| {
+        rx.recv_async().await.map_err(|e| {
             let msg = format!("Send cancelled {e:}");
             tracing::error!(msg);
             ActorError::ActorError(msg)
-        })?)
+        })
     }
 }
 
@@ -171,83 +186,63 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
 
     let mut handle_vec = vec![];
 
+    let (tx, rx) = flume::unbounded();
     // create actor and handle before running in local executor tasks
-    let (actor, handle) = ActorHandle::new(HelloWorldActor::new);
+    let (actor, handle) = ActorHandle::new(HelloWorldActor::new, tx, rx);
     let handle_wrapper = HandleWrapper { handle };
-    // without the call to shutdown done at line ~194, because we clone the handle,
-    // this would keep the recieve end of the actor channel open
-    let _handle_clone = handle_wrapper.clone();
 
     // pin actor to core 0
     handle_vec.push(
-        LocalExecutorBuilder::new(Placement::Fixed(0))
-            .name(&format!("{}{}", "rt-actor", 0))
-            .spawn(move || async move {
-                let tq = executor().create_task_queue(
-                    Shares::default(),
-                    Latency::Matters(Duration::from_millis(1)),
-                    "actor-tq",
-                );
-
-                let task = glommio::spawn_local_into(actor.run(), tq)
-                    .map(|t| t.detach())
-                    .map_err(|e| {
-                        tracing::error!("Error spawning actor {e:}");
-                        panic!("Actor core panic");
-                    })
-                    .unwrap();
-                task.await;
-            })
-            .unwrap(),
+        spawn_exec_actor(
+            actor,
+            100,
+            Latency::Matters(Duration::from_millis(1)),
+            Placement::Fixed(0),
+            "rt-actor",
+            "tq-actor",
+        )
+        .expect("Unable to spawn actor onto runtime"),
     );
 
-    // pin handle to actor to core 1
+    // define a future for the handle spawner function to execute
+    let fut = async move {
+        handle_wrapper.say_hello().await.ok();
+        tracing::info!("Sent say hello request");
+
+        if let Ok(state) = handle_wrapper.state().await {
+            tracing::info!("Actor state is {:?}", state);
+        }
+
+        handle_wrapper.stop().await.ok();
+        tracing::info!("Sent stop request");
+
+        if let Ok(state) = handle_wrapper.state().await {
+            tracing::info!("Actor state is {:?}", state);
+        }
+
+        // Expect this to fail due to how the actor is using state to
+        // drop certain requests (see line 132)
+        handle_wrapper
+            .say_hello()
+            .await
+            .expect_err("Actor still responded to say_hello despite being stopped");
+
+        // without this call, because we cloned the handle above, the program would never terminate
+        handle_wrapper.shutdown().await.ok();
+        tracing::info!("Sent shutdown request");
+    };
+
+    // pins future where handle to actor is operating to core 1
     handle_vec.push(
-        LocalExecutorBuilder::new(Placement::Fixed(1))
-            .name(&format!("{}{}", "rt-handle", 0))
-            .spawn(move || async move {
-                let tq = executor().create_task_queue(
-                    Shares::default(),
-                    Latency::NotImportant,
-                    "handle-tq",
-                );
-                let fut = async move {
-                    handle_wrapper.say_hello().await.ok();
-                    tracing::info!("Sent say hello request");
-
-                    if let Ok(state) = handle_wrapper.state().await {
-                        tracing::info!("Actor state is {:?}", state);
-                    }
-
-                    handle_wrapper.stop().await.ok();
-                    tracing::info!("Sent stop request");
-
-                    if let Ok(state) = handle_wrapper.state().await {
-                        tracing::info!("Actor state is {:?}", state);
-                    }
-
-                    // Expect this to fail due to how the actor is using state to
-                    // drop certain requests (see line 132)
-                    handle_wrapper
-                        .say_hello()
-                        .await
-                        .expect_err("Actor still responded to say_hello despite being stopped");
-
-                    // without this call, because we cloned the handle above, the program would never terminate
-                    handle_wrapper.shutdown().await.ok();
-                    tracing::info!("Sent shutdown request");
-                };
-
-                let task = glommio::spawn_local_into(fut, tq)
-                    .map(|t| t.detach())
-                    .map_err(|e| {
-                        tracing::error!("Error spawning task for handle {e:}");
-                        panic!("handle core panic");
-                    })
-                    .unwrap();
-                task.await;
-            })
-            .unwrap(),
+        spawn_exec_handle_fut(
+            100,
+            Latency::NotImportant,
+            Placement::Fixed(1),
+            "rt-handle",
+            "tq-handle",
+            fut,
+        )
+        .expect("Unable to spawn actor onto runtime"),
     );
 
     for handle in handle_vec {
