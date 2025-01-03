@@ -127,13 +127,10 @@ impl HelloWorldActor {
 
     async fn event_loop(mut self) -> Result<(), ActorError<HelloWorldEvent>> {
         self.state = ActorState::Running;
-        loop {
-            match self.receiver.recv_async().await {
-                Ok(event) => self.process(event).await,
-                Err(e) => {
-                    tracing::warn!("Channel error {e:}");
-                    break;
-                }
+        while let Ok(event) = self.receiver.recv_async().await {
+            self.process(event).await;
+            if self.state == ActorState::Stopping {
+                break;
             }
         }
         self.state = ActorState::Stopped;

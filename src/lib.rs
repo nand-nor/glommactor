@@ -5,7 +5,6 @@ pub mod channel;
 mod error;
 pub mod handle;
 mod supervisor;
-
 use std::future::Future;
 
 pub use actor::{Actor, ActorState, Event, PriorityActor, PriorityEvent, SupervisedActor};
@@ -13,7 +12,6 @@ pub use channel::{ChannelRx, ChannelTx, PriorityChannelRx, PriorityRx};
 pub use error::ActorError;
 pub use handle::{ActorHandle, Handle, PriorityHandle, SupervisedActorHandle, SupervisedHandle};
 pub use supervisor::{Supervision, Supervisor, SupervisorHandle, SupervisorMessage};
-
 pub type ActorId = u16;
 
 pub type PriorityActorHandle<T> = handle::ActorHandle<
@@ -34,6 +32,42 @@ pub fn new_priority_actor_with_handle<T: Event + Send, A: Actor<T> + Sized + Unp
 ) -> (A, PriorityActorHandle<T>) {
     let (tx, rx) = async_priority_channel::unbounded();
     handle::ActorHandle::new(constructor, tx, rx)
+}
+
+pub struct GlommioSleep {
+    pub inner: glommio::timer::Timer,
+}
+
+impl futures::Future for GlommioSleep {
+    type Output = ();
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        match std::pin::Pin::new(&mut self.inner).poll(cx) {
+            std::task::Poll::Ready(_) => std::task::Poll::Ready(()),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
+unsafe impl Send for GlommioSleep {}
+unsafe impl Sync for GlommioSleep {}
+
+impl GlommioSleep {
+    pub fn sleep_until(deadline: std::time::Instant) -> impl futures::Future<Output = ()> {
+        let duration = deadline.saturating_duration_since(std::time::Instant::now());
+        Box::pin(GlommioSleep {
+            inner: glommio::timer::Timer::new(duration),
+        })
+    }
+
+    pub fn sleep(duration: std::time::Duration) -> impl futures::Future<Output = ()> {
+        Box::pin(GlommioSleep {
+            inner: glommio::timer::Timer::new(duration),
+        })
+    }
 }
 
 /// # Panics
@@ -214,7 +248,7 @@ pub fn spawn_exec_handle_futs_with_shutdown<
 >(
     placement: Placement,
     name: &'static str,
-    mut task_vec: Fuse<F>, //Vec<glommio::task::JoinHandle<()>>,
+    mut task_vec: Fuse<F>,
     mut receiver: async_broadcast::Receiver<()>,
 ) -> Result<ExecutorJoinHandle<()>, GlommioError<()>> {
     LocalExecutorBuilder::new(placement)
@@ -222,7 +256,7 @@ pub fn spawn_exec_handle_futs_with_shutdown<
         .spawn(move || async move {
             futures::select! {
                 _ = receiver.recv().fuse() => {
-                    tracing::info!("Shutdown notice received by rt-supervisor");
+                    tracing::info!("Shutdown notice received");
                 }
                 _ = task_vec => {}
             };

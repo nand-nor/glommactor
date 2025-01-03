@@ -103,14 +103,8 @@ impl HelloWorldActor {
     }
 
     async fn event_loop(mut self) -> Result<(), ActorError<HelloWorldEvent>> {
-        loop {
-            match self.receiver.recv().await {
-                Ok((event, priority)) => self.process(event, priority).await,
-                Err(e) => {
-                    tracing::warn!("Channel error {e:}");
-                    break;
-                }
-            }
+        while let Ok((event, priority)) = self.receiver.recv().await {
+            self.process(event, priority).await
         }
         Ok(())
     }
