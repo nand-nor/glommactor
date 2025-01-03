@@ -7,15 +7,17 @@ edition = "2021"
 [dependencies]
 thiserror = "2.0.9"
 futures = "0.3.31"
-glommio = { version = "0.9.1", git="https://github.com/nand-nor/glommio", rev="bf0c68d"}
+glommio = { version = "0.9.0" }
 flume = {version= "0.11.1", features=["async"]}
-async-trait = "0.1.83"
+async-trait = "0.1.84"
 tracing = {version = "0.1.41"}
 async-priority-channel = "0.2.0"
 async-broadcast = "0.7.2"
 
 [dev-dependencies]
 tracing-subscriber = { version="0.3.0"}
+bencher = "0.1.5"
+act-zero = {version = "0.4.0", git="https://github.com/nand-nor/act-zero", rev="eb01aec", features=["glommio"], default-features=false }
 
 [[example]]
 name = "simple"
@@ -28,3 +30,8 @@ name = "supervisor_core"
 
 [[example]]
 name = "priority"
+
+[[bench]]
+name = "actors"
+path = "benches/actors.rs"
+harness = false

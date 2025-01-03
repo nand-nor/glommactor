@@ -7,7 +7,7 @@ use futures::FutureExt;
 use glommactor::{
     handle::SupervisedActorHandle, spawn_exec_actor_with_shutdown,
     spawn_exec_handle_fut_with_shutdown, Actor, ActorError, ActorId, ActorState, Event,
-    SupervisedActor, Supervision, SupervisorHandle, SupervisorMessage,
+    GlommioSleep, SupervisedActor, Supervision, SupervisorHandle, SupervisorMessage,
 };
 use glommio::{executor, Latency, LocalExecutorBuilder, Placement, Shares};
 use std::time::Duration;
@@ -235,7 +235,7 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
             tracing::error!("Failed to send say hello {e:}");
         }
         // wait a few seconds
-        glommio::timer::sleep(Duration::from_secs(5)).await;
+        GlommioSleep::sleep(Duration::from_secs(5)).await;
         tracing::info!("Supervisor suspending actor... (demonstrating restart!)");
         supervised_handle.suspend_actor(id).await.ok();
     };

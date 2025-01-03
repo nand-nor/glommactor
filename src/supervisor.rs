@@ -5,7 +5,7 @@ use std::{
 
 use crate::{
     handle::{ActorHandle, Handle},
-    Actor, ActorError, ActorId, ActorState, Event,
+    Actor, ActorError, ActorId, ActorState, Event, GlommioSleep,
 };
 use futures::FutureExt;
 
@@ -354,7 +354,10 @@ impl SupervisorHandle {
         let (tx, rx) = flume::bounded(1);
         let msg = SupervisorAction::Heartbeat { id, reply: tx };
         self.handle.send(msg).await?;
-        let mut fused_timer = glommio::timer::Timer::new(std::time::Duration::from_secs(5)).fuse();
+        let mut fused_timer = GlommioSleep {
+            inner: glommio::timer::Timer::new(std::time::Duration::from_secs(5)),
+        }
+        .fuse();
         futures::select! {
             _ = fused_timer => {
                 Err(ActorError::HeartbeatTimeout(id))

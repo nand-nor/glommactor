@@ -1,38 +1,56 @@
-//! Simple demonstration of the Actor trait and corresponding handle
-//! as implemented for a HelloWorldActor
+//! Benchmarks comparing act_zero and glommactor
+#[macro_use]
+extern crate bencher;
+
+use act_zero::runtimes::glommio::spawn_actor_with_tq;
+use act_zero::*;
+use bencher::Bencher;
 use glommactor::{
     handle::{ActorHandle, Handle},
-    spawn_exec_actor, spawn_exec_handle_fut, Actor, ActorError, ActorState, Event,
+    spawn_exec_actor, spawn_exec_handle_fut, Actor, ActorError, Event,
 };
-use glommio::{Latency, Placement};
+use glommio::{executor, Latency, LocalExecutorBuilder, Placement, Shares};
 use std::time::Duration;
-use tracing::Level;
-use tracing_subscriber::FmtSubscriber;
 
 pub type Reply<T> = flume::Sender<T>;
 
 #[derive(Clone, Debug)]
 pub enum HelloWorldEvent {
     SayHello { reply: Reply<()> },
-    Stop,
-    Start,
-    Shutdown,
-    State { reply: Reply<ActorState> },
+    State { reply: Reply<HelloState> },
+}
+
+#[derive(Clone, Debug)]
+pub enum HelloState {
+    Stopped,
+    Started,
+    Running,
 }
 
 impl Event for HelloWorldEvent {}
 
 struct HelloWorldActor {
     receiver: flume::Receiver<HelloWorldEvent>,
-    state: ActorState,
+    state: HelloState,
 }
 
 impl HelloWorldActor {
     fn new(receiver: flume::Receiver<HelloWorldEvent>) -> Self {
         Self {
             receiver,
-            state: ActorState::Started,
+            state: HelloState::Started,
         }
+    }
+}
+
+// impls needed for act_zero
+impl act_zero::Actor for HelloWorldActor {}
+
+impl act_zero::IntoActorResult for HelloState {
+    type Output = HelloState;
+
+    fn into_actor_result(self) -> ActorResult<Self::Output> {
+        Ok(Produces::Value(self))
     }
 }
 
@@ -46,7 +64,7 @@ struct HandleWrapper {
 
 #[async_trait::async_trait]
 impl Handle<HelloWorldEvent> for HandleWrapper {
-    type State = ActorState;
+    type State = HelloState;
     type Result = <ActorHandle<
         HelloWorldEvent,
         flume::Sender<HelloWorldEvent>,
@@ -77,18 +95,6 @@ impl HandleWrapper {
             ActorError::ActorError(msg)
         })?;
 
-        Ok(())
-    }
-
-    async fn stop(&self) -> Result<(), ActorError<HelloWorldEvent>> {
-        let msg = HelloWorldEvent::Stop;
-        let _ = self.handle.send(msg).await;
-        Ok(())
-    }
-
-    async fn shutdown(&self) -> Result<(), ActorError<HelloWorldEvent>> {
-        let msg = HelloWorldEvent::Shutdown;
-        let _ = self.handle.send(msg).await;
         Ok(())
     }
 
@@ -125,62 +131,35 @@ impl HelloWorldActor {
         tracing::info!("Hello, world!");
     }
 
+    async fn state(&mut self) -> HelloState {
+        self.state.clone()
+    }
+
     async fn event_loop(mut self) -> Result<(), ActorError<HelloWorldEvent>> {
-        self.state = ActorState::Running;
+        self.state = HelloState::Running;
         while let Ok(event) = self.receiver.recv_async().await {
-            self.process(event).await;
-            if self.state == ActorState::Stopping {
-                break;
-            }
+            self.process(event).await
         }
-        self.state = ActorState::Stopped;
         Ok(())
     }
 
     async fn process(&mut self, event: HelloWorldEvent) {
-        tracing::trace!("Processing event {event:?}");
-
         match event {
             HelloWorldEvent::SayHello { reply } => {
-                if self.state == ActorState::Stopped {
-                    drop(reply);
-                    return;
-                }
                 {
                     self.say_hello().await;
                     reply.send(())
                 }
                 .ok();
             }
-            HelloWorldEvent::Start => {
-                self.state = ActorState::Running;
-            }
-            HelloWorldEvent::Stop => {
-                tracing::info!("Stopping!");
-                self.state = ActorState::Stopped;
-            }
-            HelloWorldEvent::Shutdown => {
-                tracing::info!("Shutting down!");
-                self.state = ActorState::Stopping;
-                // re-assigning the receiver will close all sender ends
-                let (_sender, receiver) = flume::unbounded();
-                self.receiver = receiver;
-            }
             HelloWorldEvent::State { reply } => {
-                reply.send(self.state.clone()).ok();
+                reply.send(self.state().await).ok();
             }
         }
-        tracing::debug!("Processed");
     }
 }
 
-fn main() -> Result<(), ActorError<HelloWorldEvent>> {
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::TRACE)
-        .finish();
-
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
-
+fn glommactor_main() -> Result<(), ActorError<HelloWorldEvent>> {
     let mut handle_vec = vec![];
 
     let (tx, rx) = flume::unbounded();
@@ -192,9 +171,9 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
     handle_vec.push(
         spawn_exec_actor(
             actor,
-            100,
+            10,
             Latency::Matters(Duration::from_millis(1)),
-            Placement::Fixed(0),
+            Placement::Fixed(5),
             "rt-actor",
             "tq-actor",
         )
@@ -204,37 +183,15 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
     // define a future for the handle spawner function to execute
     let fut = async move {
         handle_wrapper.say_hello().await.ok();
-        tracing::info!("Sent say hello request");
-
-        if let Ok(state) = handle_wrapper.state().await {
-            tracing::info!("Actor state is {:?}", state);
-        }
-
-        handle_wrapper.stop().await.ok();
-        tracing::info!("Sent stop request");
-
-        if let Ok(state) = handle_wrapper.state().await {
-            tracing::info!("Actor state is {:?}", state);
-        }
-
-        // Expect this to fail due to how the actor is using state to
-        // drop certain requests (see line 132)
-        handle_wrapper
-            .say_hello()
-            .await
-            .expect_err("Actor still responded to say_hello despite being stopped");
-
-        // without this call, because we cloned the handle above, the program would never terminate
-        handle_wrapper.shutdown().await.ok();
-        tracing::info!("Sent shutdown request");
+        let _state = handle_wrapper.state().await.expect("Failed to get state");
     };
 
     // pins future where handle to actor is operating to core 1
     handle_vec.push(
         spawn_exec_handle_fut(
-            100,
-            Latency::NotImportant,
-            Placement::Fixed(1),
+            10,
+            Latency::Matters(Duration::from_millis(10)),
+            Placement::Fixed(6),
             "rt-handle",
             "tq-handle",
             fut,
@@ -248,3 +205,78 @@ fn main() -> Result<(), ActorError<HelloWorldEvent>> {
 
     Ok(())
 }
+
+fn act_zero_main() -> Result<(), act_zero::ActorError> {
+    let mut handle_vec = vec![];
+
+    handle_vec.push(
+        LocalExecutorBuilder::new(Placement::Fixed(2))
+            .name(&format!("{}{}", "actor", 0))
+            .spawn(move || async move {
+                let tq: glommio::TaskQueueHandle = executor().create_task_queue(
+                    Shares::Static(10),
+                    Latency::Matters(std::time::Duration::from_millis(10)),
+                    "other-actor-tq",
+                );
+
+                let (_tx, rx) = flume::unbounded();
+                let addr = spawn_actor_with_tq(
+                    HelloWorldActor {
+                        receiver: rx,
+                        state: HelloState::Stopped,
+                    },
+                    tq,
+                );
+                call!(addr.say_hello()).await.unwrap();
+                let _state = call!(addr.state()).await.unwrap();
+
+                /*  Add some other work to the task queue
+                let (addr_tx, addr_rx) = flume::unbounded();
+                addr_tx.send_async(addr.clone()).await.expect("Failed");
+
+                // add some other work to the task queue
+                let fut = async move {
+                    let fut_addr = addr_rx.recv_async().await.expect("Failed");
+                    call!(fut_addr.say_hello()).await.unwrap();
+                    let _state =  call!(fut_addr.state()).await.unwrap();
+                };
+
+                let t = glommio::spawn_local_into(fut, tq).map(|t| t.detach()).expect("Failed");
+                t.await;
+                */
+            })
+            .unwrap(),
+    );
+
+    handle_vec.push(
+        LocalExecutorBuilder::new(Placement::Fixed(3))
+            .name(&format!("{}{}", "busy-work", 1))
+            .spawn(move || async move {
+                // busy work to simulate action on 2 cores
+                for i in 0..1000 {
+                    let _x = i + 1;
+                }
+            })
+            .unwrap(),
+    );
+
+    for handle in handle_vec {
+        handle.join().unwrap();
+    }
+
+    Ok(())
+}
+
+fn test_glom(bencher: &mut Bencher) {
+    bencher.iter(|| glommactor_main().expect("Failure to bench using glommactor_main"));
+}
+
+fn test_actzero(bencher: &mut Bencher) {
+    bencher.iter(|| act_zero_main().expect("Failure to bench using act_zero_main"));
+}
+
+benchmark_group!(test_glommactor, test_glom);
+
+benchmark_group!(test_act_zero, test_actzero);
+
+benchmark_main!(test_glommactor, test_act_zero);
