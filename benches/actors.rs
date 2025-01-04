@@ -173,7 +173,7 @@ fn glommactor_main() -> Result<(), ActorError<HelloWorldEvent>> {
             actor,
             10,
             Latency::Matters(Duration::from_millis(1)),
-            Placement::Fixed(5),
+            Placement::Fixed(3),
             "rt-actor",
             "tq-actor",
         )
@@ -191,7 +191,7 @@ fn glommactor_main() -> Result<(), ActorError<HelloWorldEvent>> {
         spawn_exec_handle_fut(
             10,
             Latency::Matters(Duration::from_millis(10)),
-            Placement::Fixed(6),
+            Placement::Fixed(0),
             "rt-handle",
             "tq-handle",
             fut,

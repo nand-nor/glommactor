@@ -15,7 +15,8 @@ The main usecase I wanted to build for is allowing messaging/actor interaction a
 
 To get some simple comparison benchmarks I implemented glommio support in a [fork of the act-zero crate](https://github.com/nand-nor/act-zero/tree/add/glommio) and have used that for the benchmarks listed below. 
 
-The OS is WSL (5.15.167.4-microsoft-standard-WSL2 #1 SMP x86_64) using cores 0, 1, 2, and 3 of a 12th Gen Intel(R) Core(TM) i9-12900K CPU: 
+OS: WSL 5.15.167.4-microsoft-standard-WSL2 #1 SMP x86_64
+CPU: 12th Gen Intel(R) Core(TM) i9-12900K CPU: 
 ```
      Running benches/actors.rs (target/release/deps/actors-b03984d68620e47f)
 
@@ -25,3 +26,19 @@ test test_glom    ... bench:   2,474,159 ns/iter (+/- 845,877)
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 2 measured
 ```
+
+OS: 6.8.0-48-generic #48-Ubuntu SMP PREEMPT_DYNAMIC 
+CPU: Intel(R) Core(TM) i7-6600U CPU @ 2.60GHz
+```
+     Running benches/actors.rs (target/release/deps/actors-876d6916e97b779a)
+
+running 2 tests
+test test_actzero ... bench:   9,762,136 ns/iter (+/- 627,917)
+test test_glom    ... bench:  10,383,379 ns/iter (+/- 887,008)
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 2 measured
+
+```
+
+TODO:
+RPI4, RPI5, AWS compute instance?
