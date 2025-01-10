@@ -68,6 +68,17 @@ impl<T: Event + Send, S: ChannelTx<T>, R: ChannelRx<T>> ActorHandle<T, S, R> {
             },
         )
     }
+
+    /// accept an actor that is already instantiated
+    pub fn new_with<A: Actor<T> + Sized + Unpin + 'static>(actor: A, sender: S) -> (A, Self) {
+        (
+            actor,
+            Self {
+                sender,
+                phantom: PhantomData,
+            },
+        )
+    }
 }
 
 pub struct SupervisedActorHandle<T: Event + Send> {
